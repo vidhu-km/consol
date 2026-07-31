@@ -22,7 +22,7 @@
  ┌─────────────────────────────────────┬────────────────────────────────────┐
  │ Column                              │ Notes                              │
  ├─────────────────────────────────────┼────────────────────────────────────┤
- │ Entity                              │ entity name (text, join key)       │
+ │ Entity                              │ entity/type-curve name (join key)  │
  │ Npv Cash Flow BTax 10.0% (M$)      │ NPV before-tax at 10% disc (M$)   │
  │ Npv Investment BTax 0.0% (M$)      │ total investment before-tax (M$)   │
  │ Payout BTax (years)                 │ payout in years                    │
@@ -44,10 +44,11 @@
  │ consolidation #                     │ event ID (text, optional)          │
  │ well 1 name                         │ display name for well 1 (optional) │
  │ well 2 name                         │ display name for well 2 (optional) │
- │ well 1 entity                       │ entity name for before-well 1      │
- │ well 2 entity                       │ entity name for before-well 2      │
- │ enhanced well entity                │ entity name for the enhanced well  │
+ │ well 1 entity                       │ entity for before-well 1           │
+ │ well 2 entity                       │ entity for before-well 2           │
+ │ enhanced well entity                │ entity for the enhanced well       │
  └─────────────────────────────────────┴────────────────────────────────────┘
+   Classification logic:
    - Consolidation: both well 1 entity and well 2 entity populated
    - Extension: only well 1 entity populated (well 2 blank)
    - Creation: both well 1 and well 2 blank (only enhanced populated)
@@ -56,7 +57,7 @@
  ┌─────────────────────────────────────┬────────────────────────────────────┐
  │ Column                              │ Notes                              │
  ├─────────────────────────────────────┼────────────────────────────────────┤
- │ entity_name                         │ entity name (text, join key)       │
+ │ entity_name                         │ entity name (join key)             │
  │ year                                │ calendar year (int)                │
  │ month                               │ calendar month 1-12 (int)         │
  │ total_revenue                       │ monthly revenue ($)                │
@@ -68,7 +69,7 @@
  ┌─────────────────────────────────────┬────────────────────────────────────┐
  │ Column                              │ Notes                              │
  ├─────────────────────────────────────┼────────────────────────────────────┤
- │ entity                              │ entity name (text, join key)       │
+ │ entity                              │ entity name (join key)             │
  │ capex                               │ total capex ($)                    │
  └─────────────────────────────────────┴────────────────────────────────────┘
 
@@ -179,58 +180,72 @@ def safe_div(a, b):
 
 
 def fmt_money(v, signed=False):
-    if _bad(v): return DASH
+    if _bad(v):
+        return DASH
     v = float(v)
     s = "-" if v < 0 else ("+" if signed and v > 0 else "")
     a = abs(v)
-    if a >= 1e9: return f"{s}${a/1e9:,.1f}B"
-    if a >= 1e6: return f"{s}${a/1e6:,.1f}MM"
-    if a >= 1e3: return f"{s}${a/1e3:,.1f}K"
+    if a >= 1e9:
+        return f"{s}${a / 1e9:,.1f}B"
+    if a >= 1e6:
+        return f"{s}${a / 1e6:,.1f}MM"
+    if a >= 1e3:
+        return f"{s}${a / 1e3:,.1f}K"
     return f"{s}${a:,.0f}"
 
 
 def fmt_vol(v, signed=False):
-    if _bad(v): return DASH
+    if _bad(v):
+        return DASH
     v = float(v)
     s = "-" if v < 0 else ("+" if signed and v > 0 else "")
     a = abs(v)
-    if a >= 1e6: return f"{s}{a/1e6:,.1f} MMboe"
-    if a >= 1e3: return f"{s}{a/1e3:,.1f} Mboe"
+    if a >= 1e6:
+        return f"{s}{a / 1e6:,.1f} MMboe"
+    if a >= 1e3:
+        return f"{s}{a / 1e3:,.1f} Mboe"
     return f"{s}{a:,.0f} boe"
 
 
 def fmt_rate(v, signed=False):
-    if _bad(v): return DASH
+    if _bad(v):
+        return DASH
     s = "+" if signed and v > 0 else ""
     return f"{s}{v:,.0f} boe/d"
 
 
 def fmt_ratio(v, signed=False):
-    if _bad(v): return DASH
+    if _bad(v):
+        return DASH
     s = "+" if signed and v > 0 else ""
     return f"{s}{v:,.2f}x"
 
 
 def fmt_pct(v, signed=False):
-    if _bad(v): return DASH
+    if _bad(v):
+        return DASH
     s = "+" if signed and v > 0 else ""
     return f"{s}{v:,.1f}%"
 
 
 def fmt_years(v, signed=False):
-    if _bad(v): return DASH
+    if _bad(v):
+        return DASH
     s = "+" if signed and v > 0 else ""
     return f"{s}{v:,.2f} yr"
 
 
 def fmt_usdboe(v, signed=False):
-    if _bad(v): return DASH
+    if _bad(v):
+        return DASH
     s = "+" if signed and v > 0 else ""
     return f"{s}${v:,.2f}/boe"
 
 
 def fmt_int(v, signed=False):
-    if _bad(v): return DASH
+    if _bad(v):
+        return DASH
+    v = float(v)
     s = "+" if signed and v > 0 else ""
     return f"{s}{v:,.0f}"
 
@@ -249,38 +264,47 @@ def _find(stem: str) -> Path | None:
     return None
 
 
-def _norm(s) -> str:
-    """Lowercase, strip punctuation, collapse whitespace — for column matching."""
+def _norm_col(s) -> str:
+    """Lowercase, strip all non-alphanumeric, collapse whitespace."""
     return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
 
 
-def _resolve_col(df: pd.DataFrame, aliases: list[str]) -> str | None:
-    """Find the first column in df whose normalised header matches any alias."""
-    lookup = {_norm(c): c for c in df.columns}
+def _find_col(df: pd.DataFrame, aliases: list[str]) -> str | None:
+    """Find the first df column whose normalised name matches any alias."""
+    lookup = {_norm_col(c): c for c in df.columns}
     for a in aliases:
-        if _norm(a) in lookup:
-            return lookup[_norm(a)]
+        key = _norm_col(a)
+        if key in lookup:
+            return lookup[key]
     return None
 
 
 def _to_num(s: pd.Series) -> pd.Series:
     if pd.api.types.is_numeric_dtype(s):
         return s.astype("float64")
-    t = (s.astype(str).str.replace(r"[,$\s%]", "", regex=True)
+    t = (s.astype(str)
+         .str.replace(r"[,$\s%]", "", regex=True)
          .str.replace(r"^\((.*)\)$", r"-\1", regex=True)
-         .replace({"": None, "-": None, "NA": None, "N/A": None, "nan": None, "None": None}))
+         .replace({"": None, "-": None, "NA": None, "N/A": None,
+                   "nan": None, "None": None, "none": None}))
     return pd.to_numeric(t, errors="coerce")
 
 
 def _clean(v) -> str:
-    if v is None or (isinstance(v, float) and not np.isfinite(v)):
+    """Clean a cell value to a trimmed string; NaN/null -> empty string."""
+    if v is None:
         return ""
-    s = re.sub(r"\s+", " ", str(v)).strip()
-    return "" if s.lower() in {"nan", "none", "null", "n/a", "na", "#n/a", "-", "."} else s
+    if isinstance(v, float) and not np.isfinite(v):
+        return ""
+    s = str(v).strip()
+    if s.lower() in {"nan", "none", "null", "n/a", "na", "#n/a", "-", "."}:
+        return ""
+    return s
 
 
 def _key(v) -> str:
-    return _clean(v).upper()
+    """Canonical join key: cleaned + uppercased."""
+    return _clean(v).strip().upper()
 
 
 def _maybe_pct(s: pd.Series) -> pd.Series:
@@ -296,319 +320,361 @@ def _read(path: Path) -> pd.DataFrame:
     return pd.read_excel(path, sheet_name=0)
 
 
-# ─── COLUMN ALIAS MAPS (hardcoded) ──────────────────────────────────────────
-
-ECON_COLS = {
-    "entity":  ["Entity", "entity_name", "Entity Name", "Well", "Propnum"],
-    "npv":     ["Npv Cash Flow BTax 10.0% (M$)", "NPV Cash Flow BTax 10% (M$)", "NPV BTax 10%", "npv"],
-    "invest":  ["Npv Investment BTax 0.0% (M$)", "NPV Investment BTax 0% (M$)", "Investment BTax", "Total Investment"],
-    "payout":  ["Payout BTax (years)", "Payout BTax", "Payout"],
-    "boe":     ["Boe WI Total (boe)", "BOE WI Total", "Net BOE", "boe"],
-    "fy_rate": ["1st Year Production Rate (boepd)", "First Year Production Rate", "1st Yr Rate"],
-    "cor":     ["Cost of Reserves ($/boe)", "Cost of Reserves", "COR"],
-    "ip30":    ["IP30 Cum (boe)", "IP30 Cum", "IP30"],
-    "ror":     ["BTax Disc. CF. ROR (%)", "BTax Disc CF ROR", "ROR", "IRR"],
-    "wi":      ["Initial WI (%)", "Initial WI", "WI"],
-    "avg3":    ["3 Month Avg Production (boepd)", "3 Mo Avg Production", "3 Month Avg Rate"],
-}
-
-CONSOL_COLS = {
-    "event_id": ["consolidation #", "consolidation number", "consol #", "event", "event id", "id"],
-    "w1_name":  ["well 1 name", "well1 name", "well_1_name"],
-    "w2_name":  ["well 2 name", "well2 name", "well_2_name"],
-    "w1_ent":   ["well 1 entity", "well1 entity", "well_1_entity"],
-    "w2_ent":   ["well 2 entity", "well2 entity", "well_2_entity"],
-    "enh_ent":  ["enhanced well entity", "enhanced entity", "enhanced well"],
-}
-
-FORECAST_COLS = {
-    "entity":  ["entity_name", "Entity", "Entity Name", "Well"],
-    "year":    ["year", "yr", "cal_year"],
-    "month":   ["month", "mo", "cal_month"],
-    "revenue": ["total_revenue", "revenue", "Total Revenue"],
-    "opinc":   ["operating_income", "op_income", "Operating Income"],
-    "cf":      ["cash_flow", "cashflow", "Cash Flow", "net_cash_flow"],
-}
-
-CAPEX_COLS = {
-    "entity": ["entity", "Entity", "entity_name", "Well"],
-    "capex":  ["capex", "CAPEX", "Capital", "total_capex"],
-}
-
-
-def _load_and_map(stem: str, col_map: dict[str, list[str]]) -> pd.DataFrame:
-    """Find file, read it, resolve columns by alias, return standardised df."""
-    p = _find(stem)
-    if p is None:
-        dirs = ", ".join(str(d) for d in SEARCH_DIRS if d.exists())
-        raise FileNotFoundError(f"{stem}.xlsx not found. Searched: {dirs}")
-    raw = _read(p)
-    out = pd.DataFrame(index=raw.index)
-    for key, aliases in col_map.items():
-        src = _resolve_col(raw, aliases)
-        if src is None:
-            out[key] = np.nan
-        else:
-            out[key] = raw[src]
-    return out
+def _get_entity_col(df: pd.DataFrame) -> str | None:
+    """Every file has an entity column — find it by trying common names."""
+    return _find_col(df, [
+        "Entity", "entity", "entity_name", "Entity Name",
+        "Well", "Propnum", "well name",
+    ])
 
 
 # ─── LOAD ALL DATA ──────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner="Loading data…")
 def load_all():
-    """Returns (econ_df, consol_df, forecast_df, capex_df) with canonical columns."""
-    econ = _load_and_map("economics", ECON_COLS)
-    consol = _load_and_map("consol", CONSOL_COLS)
-    forecast = _load_and_map("forecast", FORECAST_COLS)
-    capex = _load_and_map("capex", CAPEX_COLS)
+    """Load and standardise all four xlsx files. Returns dict of DataFrames."""
 
-    # --- economics: clean & scale ---
-    econ["entity"] = econ["entity"].map(_clean)
-    econ["entity_key"] = econ["entity"].map(_key)
-    econ = econ[econ["entity_key"] != ""].drop_duplicates("entity_key", keep="first")
-    for c in ["npv", "invest", "payout", "boe", "fy_rate", "cor", "ip30", "ror", "wi", "avg3"]:
-        econ[c] = _to_num(econ[c])
+    # ── ECONOMICS ────────────────────────────────────────────────────────
+    p = _find("economics")
+    if p is None:
+        raise FileNotFoundError("economics.xlsx not found")
+    raw_econ = _read(p)
+
+    ent_col = _get_entity_col(raw_econ)
+    if ent_col is None:
+        raise ValueError(f"economics.xlsx: cannot find entity column. Columns: {list(raw_econ.columns)}")
+
+    econ = pd.DataFrame()
+    econ["entity_raw"] = raw_econ[ent_col].map(_clean)
+    econ["entity_key"] = econ["entity_raw"].map(_key)
+
+    col_map = {
+        "npv":     ["Npv Cash Flow BTax 10.0% (M$)", "NPV Cash Flow BTax 10% (M$)", "NPV BTax 10%", "npv"],
+        "invest":  ["Npv Investment BTax 0.0% (M$)", "NPV Investment BTax 0% (M$)", "Investment BTax", "Total Investment", "invest"],
+        "payout":  ["Payout BTax (years)", "Payout BTax", "Payout", "payout"],
+        "boe":     ["Boe WI Total (boe)", "BOE WI Total", "Net BOE", "boe"],
+        "fy_rate": ["1st Year Production Rate (boepd)", "First Year Production Rate", "1st Yr Rate", "fy_rate"],
+        "cor":     ["Cost of Reserves ($/boe)", "Cost of Reserves", "COR", "cor"],
+        "ip30":    ["IP30 Cum (boe)", "IP30 Cum", "IP30", "ip30"],
+        "ror":     ["BTax Disc. CF. ROR (%)", "BTax Disc CF ROR", "ROR", "IRR", "ror"],
+        "wi":      ["Initial WI (%)", "Initial WI", "WI", "wi"],
+        "avg3":    ["3 Month Avg Production (boepd)", "3 Mo Avg Production", "3 Month Avg Rate", "avg3"],
+    }
+    for key, aliases in col_map.items():
+        src = _find_col(raw_econ, aliases)
+        econ[key] = _to_num(raw_econ[src]) if src is not None else np.nan
+
+    econ = econ[econ["entity_key"] != ""].drop_duplicates("entity_key", keep="first").copy()
     econ["npv"] = econ["npv"] * ECON_MONEY_SCALE
     econ["invest"] = econ["invest"] * ECON_MONEY_SCALE
     econ["ror"] = _maybe_pct(econ["ror"])
     econ["wi"] = _maybe_pct(econ["wi"])
-    # derived
-    econ["npv_inv"] = econ.apply(lambda r: safe_div(r["npv"], r["invest"]), axis=1)
-    econ["inv_boe"] = econ.apply(lambda r: safe_div(r["invest"], r["boe"]), axis=1)
-    econ["npv_boe"] = econ.apply(lambda r: safe_div(r["npv"], r["boe"]), axis=1)
 
-    # --- capex: clean & aggregate ---
-    capex["entity"] = capex["entity"].map(_clean)
-    capex["entity_key"] = capex["entity"].map(_key)
-    capex["capex"] = _to_num(capex["capex"])
+    # ── CAPEX ────────────────────────────────────────────────────────────
+    p = _find("capex")
+    if p is None:
+        raise FileNotFoundError("capex.xlsx not found")
+    raw_capex = _read(p)
+
+    ent_col = _get_entity_col(raw_capex)
+    if ent_col is None:
+        raise ValueError(f"capex.xlsx: cannot find entity column. Columns: {list(raw_capex.columns)}")
+
+    capex = pd.DataFrame()
+    capex["entity_key"] = raw_capex[ent_col].map(_key)
+    capex_col = _find_col(raw_capex, ["capex", "CAPEX", "Capital", "total_capex"])
+    capex["capex"] = _to_num(raw_capex[capex_col]) if capex_col else np.nan
     capex = capex[capex["entity_key"] != ""]
-    capex = capex.groupby("entity_key", as_index=False).agg(capex=("capex", "sum"))
+    capex = capex.groupby("entity_key", as_index=False)["capex"].sum()
 
-    # --- consol: clean & classify ---
-    for c in ["w1_ent", "w2_ent", "enh_ent", "w1_name", "w2_name", "event_id"]:
-        consol[c] = consol[c].map(_clean)
-    # auto-generate event IDs where missing
-    consol["event_id"] = [
-        v if v else f"ROW-{i+2:04d}" for i, v in enumerate(consol["event_id"])
-    ]
+    # ── CONSOL ───────────────────────────────────────────────────────────
+    p = _find("consol")
+    if p is None:
+        raise FileNotFoundError("consol.xlsx not found")
+    raw_consol = _read(p)
+
+    consol = pd.DataFrame()
+    # event id
+    id_col = _find_col(raw_consol, ["consolidation #", "consolidation number", "consol #",
+                                     "event", "event id", "id"])
+    consol["event_id"] = raw_consol[id_col].map(_clean) if id_col is not None else ""
+    # well names (optional)
+    for key, aliases in [("w1_name", ["well 1 name", "well1 name", "well_1_name"]),
+                         ("w2_name", ["well 2 name", "well2 name", "well_2_name"])]:
+        src = _find_col(raw_consol, aliases)
+        consol[key] = raw_consol[src].map(_clean) if src is not None else ""
+    # entity columns (required)
+    for key, aliases in [("w1_ent", ["well 1 entity", "well1 entity", "well_1_entity"]),
+                         ("w2_ent", ["well 2 entity", "well2 entity", "well_2_entity"]),
+                         ("enh_ent", ["enhanced well entity", "enhanced entity", "enhanced well"])]:
+        src = _find_col(raw_consol, aliases)
+        if src is not None:
+            consol[key] = raw_consol[src].map(_clean)
+        else:
+            raise ValueError(f"consol.xlsx: cannot find '{key}' column. Columns: {list(raw_consol.columns)}")
+
+    # auto-generate missing event IDs
+    consol["event_id"] = [v if v else f"EVT-{i + 1:04d}" for i, v in enumerate(consol["event_id"])]
+
+    # classify
     n_src = (consol["w1_ent"] != "").astype(int) + (consol["w2_ent"] != "").astype(int)
     consol["case"] = np.select(
         [n_src == 2, n_src == 1, n_src == 0],
         ["Consolidation", "Extension", "Creation"], default="Unclassified")
     consol.loc[consol["enh_ent"] == "", "case"] = "Unclassified"
-    # drop unclassified (no enhanced entity = unusable)
     consol = consol[consol["case"] != "Unclassified"].reset_index(drop=True)
 
-    # --- forecast: clean & parse dates ---
-    forecast["entity"] = forecast["entity"].map(_clean)
-    forecast["entity_key"] = forecast["entity"].map(_key)
-    forecast["year"] = _to_num(forecast["year"])
-    forecast["month"] = _to_num(forecast["month"])
-    for c in ["revenue", "opinc", "cf"]:
-        forecast[c] = _to_num(forecast[c])
-    ok = forecast["year"].between(1900, 2200) & forecast["month"].between(1, 12)
-    forecast = forecast[ok].copy()
-    forecast["date"] = pd.to_datetime(dict(
-        year=forecast["year"].astype(int), month=forecast["month"].astype(int), day=1))
-    forecast = forecast[forecast["entity_key"] != ""]
+    # ── FORECAST ─────────────────────────────────────────────────────────
+    p = _find("forecast")
+    if p is None:
+        raise FileNotFoundError("forecast.xlsx not found")
+    raw_fc = _read(p)
 
-    return econ, consol, forecast, capex
+    ent_col = _get_entity_col(raw_fc)
+    if ent_col is None:
+        raise ValueError(f"forecast.xlsx: cannot find entity column. Columns: {list(raw_fc.columns)}")
+
+    fc = pd.DataFrame()
+    fc["entity_key"] = raw_fc[ent_col].map(_key)
+    for key, aliases in [("year", ["year", "yr", "cal_year"]),
+                         ("month", ["month", "mo", "cal_month"])]:
+        src = _find_col(raw_fc, aliases)
+        fc[key] = _to_num(raw_fc[src]) if src is not None else np.nan
+    for key, aliases in [("revenue", ["total_revenue", "revenue", "Total Revenue"]),
+                         ("opinc", ["operating_income", "op_income", "Operating Income"]),
+                         ("cf", ["cash_flow", "cashflow", "Cash Flow", "net_cash_flow"])]:
+        src = _find_col(raw_fc, aliases)
+        fc[key] = _to_num(raw_fc[src]) if src is not None else 0.0
+
+    ok = fc["year"].between(1900, 2200) & fc["month"].between(1, 12) & (fc["entity_key"] != "")
+    fc = fc[ok].copy()
+    fc["date"] = pd.to_datetime(dict(
+        year=fc["year"].astype(int), month=fc["month"].astype(int), day=1))
+
+    return econ, consol, fc, capex
 
 
 # ─── BUILD EVENT ECONOMICS ──────────────────────────────────────────────────
 
-# The additive metrics we sum across wells on a side
 ADD_KEYS = ["npv", "invest", "capex", "boe", "fy_rate", "ip30", "avg3"]
-# Metrics where we show weighted average or recompute from aggregates
 ALL_ECON_KEYS = ADD_KEYS + ["payout", "ror", "cor", "wi", "npv_inv", "inv_boe", "npv_boe"]
 
 
-def _lookup_entity(econ: pd.DataFrame, capex: pd.DataFrame, entity_key: str) -> dict:
-    """Pull a single entity's metrics from econ + capex. Returns dict or all-NaN."""
+def _lookup(econ: pd.DataFrame, capex: pd.DataFrame, raw_entity: str) -> dict:
+    """Pull one entity's metrics from econ + capex. Returns dict keyed by metric."""
     out = {k: np.nan for k in ALL_ECON_KEYS}
-    er = econ[econ["entity_key"] == entity_key]
-    if not er.empty:
-        r = er.iloc[0]
+    ek = _key(raw_entity)
+    if not ek:
+        return out
+
+    mask = econ["entity_key"] == ek
+    if mask.any():
+        r = econ.loc[mask].iloc[0]
         for k in ALL_ECON_KEYS:
-            if k != "capex":
-                out[k] = r.get(k, np.nan)
-    cr = capex[capex["entity_key"] == entity_key]
-    if not cr.empty:
-        out["capex"] = float(cr.iloc[0]["capex"])
+            if k in r.index:
+                val = r[k]
+                out[k] = float(val) if not _bad(val) else np.nan
+
+    cmask = capex["entity_key"] == ek
+    if cmask.any():
+        out["capex"] = float(capex.loc[cmask, "capex"].iloc[0])
+
+    # derived
+    out["npv_inv"] = safe_div(out["npv"], out["invest"])
+    out["inv_boe"] = safe_div(out["invest"], out["boe"])
+    out["npv_boe"] = safe_div(out["npv"], out["boe"])
     return out
 
 
-def _sum_dicts(dicts: list[dict]) -> dict:
-    """Sum additive keys across dicts; recompute derived."""
-    out = {k: 0.0 for k in ADD_KEYS}
-    n = len(dicts)
-    # Sum additive
-    for d in dicts:
-        for k in ADD_KEYS:
-            v = d.get(k, np.nan)
-            if not _bad(v):
-                out[k] = out.get(k, 0.0) + float(v)
-    # Weighted averages (invest-weighted for payout/ror, boe-weighted for cor/wi)
-    def _wavg(key, weight_key):
-        num = sum(d[key] * d[weight_key] for d in dicts
-                  if not _bad(d.get(key)) and not _bad(d.get(weight_key)))
-        den = sum(d[weight_key] for d in dicts
-                  if not _bad(d.get(key)) and not _bad(d.get(weight_key)))
+def _sum_sides(dicts: list[dict]) -> dict:
+    """Aggregate multiple entity dicts into one side (before/after)."""
+    if not dicts:
+        return {k: 0.0 for k in ADD_KEYS + ["payout", "ror", "cor", "wi",
+                                              "npv_inv", "inv_boe", "npv_boe", "n_wells"]}
+
+    out = {}
+    # additive: sum
+    for k in ADD_KEYS:
+        vals = [d[k] for d in dicts if not _bad(d[k])]
+        out[k] = sum(vals) if vals else np.nan
+
+    # weighted averages
+    def _wavg(metric, wt):
+        pairs = [(d[metric], d[wt]) for d in dicts
+                 if not _bad(d.get(metric)) and not _bad(d.get(wt))]
+        if not pairs:
+            return np.nan
+        num = sum(m * w for m, w in pairs)
+        den = sum(w for _, w in pairs)
         return safe_div(num, den)
+
     out["payout"] = _wavg("payout", "invest")
     out["ror"] = _wavg("ror", "invest")
     out["cor"] = _wavg("cor", "boe")
     out["wi"] = _wavg("wi", "boe")
-    # Derived
+
+    # derived from aggregated additive
     out["npv_inv"] = safe_div(out["npv"], out["invest"])
     out["inv_boe"] = safe_div(out["invest"], out["boe"])
     out["npv_boe"] = safe_div(out["npv"], out["boe"])
-    out["n_wells"] = n
+    out["n_wells"] = len(dicts)
     return out
 
 
 @st.cache_data(show_spinner="Building event model…")
 def build_events():
-    econ, consol, forecast, capex = load_all()
+    econ, consol, fc, capex = load_all()
+    econ_keys = set(econ["entity_key"])
+    capex_keys = set(capex["entity_key"])
+
+    debug_info = {
+        "econ_count": len(econ),
+        "capex_count": len(capex),
+        "consol_count": len(consol),
+        "fc_count": len(fc),
+        "sample_econ_keys": list(econ["entity_key"].head(5)),
+    }
+
     rows = []
     for _, ev in consol.iterrows():
         eid = ev["event_id"]
         case = ev["case"]
-        w1k = _key(ev["w1_ent"])
-        w2k = _key(ev["w2_ent"])
-        enhk = _key(ev["enh_ent"])
-        if not enhk:
-            continue  # skip if no enhanced entity
+        w1_raw = ev["w1_ent"]
+        w2_raw = ev["w2_ent"]
+        enh_raw = ev["enh_ent"]
 
-        # before side
-        before_entities = []
-        if w1k:
-            before_entities.append(_lookup_entity(econ, capex, w1k))
-        if w2k and w2k != w1k:
-            before_entities.append(_lookup_entity(econ, capex, w2k))
+        if not _key(enh_raw):
+            continue
 
-        if before_entities:
-            before = _sum_dicts(before_entities)
-        else:
-            before = {k: 0.0 for k in ALL_ECON_KEYS}
-            before["n_wells"] = 0
+        # before side: collect entity lookups
+        before_list = []
+        if _key(w1_raw):
+            before_list.append(_lookup(econ, capex, w1_raw))
+        if _key(w2_raw) and _key(w2_raw) != _key(w1_raw):
+            before_list.append(_lookup(econ, capex, w2_raw))
 
-        # after side = the single enhanced entity
-        after_raw = _lookup_entity(econ, capex, enhk)
-        after = dict(after_raw)
-        after["n_wells"] = 1
+        before = _sum_sides(before_list)
 
-        # build row
-        row = {"event_id": eid, "case": case,
-               "w1_name": ev["w1_name"], "w2_name": ev["w2_name"],
-               "w1_ent": ev["w1_ent"], "w2_ent": ev["w2_ent"], "enh_ent": ev["enh_ent"]}
-        row["wells_before"] = before["n_wells"]
-        row["wells_after"] = 1
-        row["wells_net"] = 1 - before["n_wells"]
+        # after side: just the enhanced entity
+        after_d = _lookup(econ, capex, enh_raw)
+        after_d["n_wells"] = 1
+
+        # build flat row
+        row = {
+            "event_id": eid, "case": case,
+            "w1_name": ev["w1_name"], "w2_name": ev["w2_name"],
+            "w1_ent": w1_raw, "w2_ent": w2_raw, "enh_ent": enh_raw,
+            "wells_before": before.get("n_wells", 0),
+            "wells_after": 1,
+            "wells_net": 1 - before.get("n_wells", 0),
+            # join diagnostics
+            "w1_found": _key(w1_raw) in econ_keys if _key(w1_raw) else None,
+            "w2_found": _key(w2_raw) in econ_keys if _key(w2_raw) else None,
+            "enh_found": _key(enh_raw) in econ_keys,
+        }
+
         for k in ALL_ECON_KEYS:
-            row[f"before_{k}"] = before[k]
-            row[f"after_{k}"] = after[k]
-            b, a = before[k], after[k]
-            row[f"delta_{k}"] = (a - b) if not (_bad(a) or _bad(b)) else np.nan
+            bv = before.get(k, np.nan)
+            av = after_d.get(k, np.nan)
+            row[f"before_{k}"] = bv
+            row[f"after_{k}"] = av
+            row[f"delta_{k}"] = (av - bv) if not (_bad(av) or _bad(bv)) else np.nan
+
         rows.append(row)
 
     ev_df = pd.DataFrame(rows)
-    if ev_df.empty:
-        return ev_df, consol, econ, forecast, capex
+    if not ev_df.empty:
+        ev_df["invest_saved"] = -ev_df["delta_invest"]
+        ev_df["capex_saved"] = -ev_df["delta_capex"]
+        ev_df["value_created"] = ev_df["delta_npv"]
 
-    # computed columns
-    ev_df["invest_saved"] = -ev_df["delta_invest"]
-    ev_df["capex_saved"] = -ev_df["delta_capex"]
-    ev_df["value_created"] = ev_df["delta_npv"]
-    return ev_df, consol, econ, forecast, capex
+    return ev_df, consol, econ, fc, capex, debug_info
 
 
-# ─── AGGREGATE BY CASE & PORTFOLIO ──────────────────────────────────────────
+# ─── AGGREGATE ───────────────────────────────────────────────────────────────
 
 def _aggregate_events(ev: pd.DataFrame) -> pd.Series:
-    """Aggregate a set of event rows into a single summary series."""
+    """Aggregate event rows into a portfolio or case summary."""
     out = {}
     out["n_events"] = len(ev)
     out["wells_before"] = ev["wells_before"].sum()
     out["wells_after"] = ev["wells_after"].sum()
     out["wells_net"] = ev["wells_net"].sum()
+
     for side in ("before", "after"):
         for k in ADD_KEYS:
-            out[f"{side}_{k}"] = ev[f"{side}_{k}"].sum()
-        # weighted averages
+            col = f"{side}_{k}"
+            out[col] = ev[col].sum(min_count=1)
+
         def _wa(metric, weight):
             m = ev[f"{side}_{metric}"]
             w = ev[f"{side}_{weight}"]
-            valid = m.notna() & w.notna()
+            valid = m.notna() & w.notna() & (w != 0)
             if valid.sum() == 0:
                 return np.nan
-            return (m[valid] * w[valid]).sum() / w[valid].sum()
+            return float((m[valid] * w[valid]).sum() / w[valid].sum())
+
         out[f"{side}_payout"] = _wa("payout", "invest")
         out[f"{side}_ror"] = _wa("ror", "invest")
         out[f"{side}_cor"] = _wa("cor", "boe")
         out[f"{side}_wi"] = _wa("wi", "boe")
-        # derived
         out[f"{side}_npv_inv"] = safe_div(out[f"{side}_npv"], out[f"{side}_invest"])
         out[f"{side}_inv_boe"] = safe_div(out[f"{side}_invest"], out[f"{side}_boe"])
         out[f"{side}_npv_boe"] = safe_div(out[f"{side}_npv"], out[f"{side}_boe"])
+
     for k in ALL_ECON_KEYS:
-        b, a = out[f"before_{k}"], out[f"after_{k}"]
+        b, a = out.get(f"before_{k}", np.nan), out.get(f"after_{k}", np.nan)
         out[f"delta_{k}"] = (a - b) if not (_bad(a) or _bad(b)) else np.nan
-    out["invest_saved"] = -out["delta_invest"]
-    out["capex_saved"] = -out["delta_capex"]
-    out["value_created"] = out["delta_npv"]
-    out["cap_productivity_idx"] = safe_div(out["after_npv_inv"], out["before_npv_inv"])
-    # per well
+
+    out["invest_saved"] = -out.get("delta_invest", np.nan) if not _bad(out.get("delta_invest")) else np.nan
+    out["capex_saved"] = -out.get("delta_capex", np.nan) if not _bad(out.get("delta_capex")) else np.nan
+    out["value_created"] = out.get("delta_npv", np.nan)
+    out["cap_productivity_idx"] = safe_div(out.get("after_npv_inv"), out.get("before_npv_inv"))
+
+    # per-well
     for k in ADD_KEYS:
-        out[f"before_{k}_pw"] = safe_div(out[f"before_{k}"], out["wells_before"])
-        out[f"after_{k}_pw"] = safe_div(out[f"after_{k}"], out["wells_after"])
-        d_pw_b, d_pw_a = out[f"before_{k}_pw"], out[f"after_{k}_pw"]
-        out[f"delta_{k}_pw"] = (d_pw_a - d_pw_b) if not (_bad(d_pw_a) or _bad(d_pw_b)) else np.nan
+        out[f"before_{k}_pw"] = safe_div(out.get(f"before_{k}"), out["wells_before"])
+        out[f"after_{k}_pw"] = safe_div(out.get(f"after_{k}"), out["wells_after"])
+        b_pw, a_pw = out[f"before_{k}_pw"], out[f"after_{k}_pw"]
+        out[f"delta_{k}_pw"] = (a_pw - b_pw) if not (_bad(a_pw) or _bad(b_pw)) else np.nan
+
     return pd.Series(out)
 
 
 # ─── FORECAST PANEL ──────────────────────────────────────────────────────────
 
-def _build_forecast_panel(consol: pd.DataFrame, forecast: pd.DataFrame,
+def _build_forecast_panel(consol: pd.DataFrame, fc: pd.DataFrame,
                           event_ids: set | None = None) -> pd.DataFrame:
-    """Monthly before/after/incremental panel for a set of events."""
-    if forecast.empty or consol.empty:
+    if fc.empty or consol.empty:
         return pd.DataFrame()
 
+    vals = ["revenue", "opinc", "cf"]
     rows_before, rows_after = [], []
+
     for _, ev in consol.iterrows():
         if event_ids is not None and ev["event_id"] not in event_ids:
             continue
         w1k, w2k, enhk = _key(ev["w1_ent"]), _key(ev["w2_ent"]), _key(ev["enh_ent"])
-        before_keys = [k for k in [w1k, w2k] if k]
-        after_keys = [enhk] if enhk else []
-        for k in before_keys:
-            f = forecast[forecast["entity_key"] == k]
+        for bk in [w1k, w2k]:
+            if bk:
+                f = fc[fc["entity_key"] == bk]
+                if not f.empty:
+                    rows_before.append(f[["date"] + vals])
+        if enhk:
+            f = fc[fc["entity_key"] == enhk]
             if not f.empty:
-                rows_before.append(f[["date", "revenue", "opinc", "cf"]])
-        for k in after_keys:
-            f = forecast[forecast["entity_key"] == k]
-            if not f.empty:
-                rows_after.append(f[["date", "revenue", "opinc", "cf"]])
-
-    if not rows_before and not rows_after:
-        return pd.DataFrame()
-
-    vals = ["revenue", "opinc", "cf"]
+                rows_after.append(f[["date"] + vals])
 
     def _agg(parts):
         if not parts:
             return pd.DataFrame()
-        df = pd.concat(parts, ignore_index=True)
-        return df.groupby("date", as_index=False)[vals].sum()
+        return pd.concat(parts, ignore_index=True).groupby("date", as_index=False)[vals].sum()
 
     b = _agg(rows_before)
     a = _agg(rows_after)
-
-    # merge on date
     if b.empty and a.empty:
         return pd.DataFrame()
+
     if b.empty:
         panel = a.rename(columns={v: f"after_{v}" for v in vals})
         for v in vals:
@@ -662,7 +728,7 @@ def kpi(label, value, delta=None, dir_=0, sub=None, tone=""):
 
 def kpi_grid(cards, ncols=4):
     for i in range(0, len(cards), ncols):
-        for col, c in zip(st.columns(ncols), cards[i:i+ncols]):
+        for col, c in zip(st.columns(ncols), cards[i:i + ncols]):
             with col:
                 kpi(**c)
 
@@ -686,16 +752,14 @@ def show_df(df, height=None):
 
 
 def _dir(delta, good=1):
-    """Return +1/-1/0 direction for a KPI arrow."""
-    if _bad(delta) or abs(delta) < 1e-12:
+    if _bad(delta) or abs(float(delta)) < 1e-12:
         return 0
-    return int(np.sign(delta) * good)
+    return int(np.sign(float(delta)) * good)
 
 
-# ─── METRIC DEFINITIONS (for table display) ─────────────────────────────────
+# ─── METRIC DEFINITIONS ─────────────────────────────────────────────────────
 
 METRIC_DEFS = [
-    # (key, label, fmt_fn, good: +1=higher better, -1=lower better)
     ("npv",     "NPV BTax @10%",        fmt_money,  +1),
     ("invest",  "Investment BTax @0%",   fmt_money,  -1),
     ("capex",   "Capex",                 fmt_money,  -1),
@@ -728,10 +792,11 @@ def _metric_card(key, before, after, label=None):
                 tone="pos" if _dir(d, g) > 0 else ("neg" if _dir(d, g) < 0 else ""))
 
 
-# ─── CHARTS ─────────────────────────────────────────────────────────────────
+# ─── CHARTS ──────────────────────────────────────────────────────────────────
 
 def _fin(fig, title, h=420, ytitle="", tickpre=""):
-    fig.update_layout(title=title, height=h, yaxis_title=ytitle, bargap=0.28, hovermode="x unified")
+    fig.update_layout(title=title, height=h, yaxis_title=ytitle,
+                      bargap=0.28, hovermode="x unified")
     if tickpre:
         fig.update_yaxes(tickprefix=tickpre)
     return fig
@@ -741,7 +806,7 @@ def chart_bridge(ev):
     wb = float(ev["wells_before"].sum())
     per = {c: float(ev.loc[ev["case"] == c, "wells_net"].sum()) for c in CASE_ORDER}
     labels = ["Before inventory"] + [f"{c}\nnet" for c in CASE_ORDER] + ["After inventory"]
-    vals = [wb] + [per[c] for c in CASE_ORDER] + [float(ev["wells_after"].sum())]
+    vals = [wb] + [per.get(c, 0) for c in CASE_ORDER] + [float(ev["wells_after"].sum())]
     meas = ["absolute"] + ["relative"] * 3 + ["total"]
     fig = go.Figure(go.Waterfall(
         orientation="v", measure=meas, x=labels, y=vals,
@@ -755,7 +820,9 @@ def chart_bridge(ev):
     return _fin(fig, "Inventory Bridge — Well Count", 400, "Wells")
 
 
-def chart_waterfall_metric(ev, key, title, fmt_fn=fmt_money, topn=12):
+def chart_waterfall_metric(ev, key, title, topn=12):
+    fmap = {k: f for k, _, f, _ in METRIC_DEFS}
+    fmt_fn = fmap.get(key, fmt_money)
     d = ev[["event_id", "case", f"delta_{key}"]].dropna(subset=[f"delta_{key}"]).copy()
     d = d.rename(columns={f"delta_{key}": "d"})
     d = d.reindex(d["d"].abs().sort_values(ascending=False).index)
@@ -779,7 +846,7 @@ def chart_waterfall_metric(ev, key, title, fmt_fn=fmt_money, topn=12):
 
     fig = go.Figure(go.Waterfall(
         orientation="v", measure=meas, x=labels, y=vals,
-        text=[fmt_fn(v, signed=(m == "relative")) for v, m in zip(vals, meas)],
+        text=[fmt_fn(v, signed=(m_ == "relative")) for v, m_ in zip(vals, meas)],
         textposition="outside", textfont=dict(size=10),
         increasing=dict(marker_color=CLR["green"]),
         decreasing=dict(marker_color=CLR["red"]),
@@ -790,15 +857,19 @@ def chart_waterfall_metric(ev, key, title, fmt_fn=fmt_money, topn=12):
     return _fin(fig, title, 470, tickpre="$")
 
 
-def chart_case_bars(case_data, key, title, fmt_fn=fmt_money):
-    cases = list(case_data.keys())
-    before_vals = [case_data[c][f"before_{key}"] for c in cases]
-    after_vals = [case_data[c][f"after_{key}"] for c in cases]
+def chart_case_bars(case_agg, key, title):
+    fmap = {k: f for k, _, f, _ in METRIC_DEFS}
+    fmt_fn = fmap.get(key, fmt_money)
+    cases = [c for c in CASE_ORDER if c in case_agg]
+    before_vals = [case_agg[c][f"before_{key}"] for c in cases]
+    after_vals = [case_agg[c][f"after_{key}"] for c in cases]
     fig = go.Figure()
     fig.add_trace(go.Bar(x=cases, y=before_vals, name="Before", marker_color=CLR["before"],
-                         text=[fmt_fn(v) for v in before_vals], textposition="outside", textfont_size=10))
+                         text=[fmt_fn(v) for v in before_vals], textposition="outside",
+                         textfont_size=10))
     fig.add_trace(go.Bar(x=cases, y=after_vals, name="After", marker_color=CLR["after"],
-                         text=[fmt_fn(v) for v in after_vals], textposition="outside", textfont_size=10))
+                         text=[fmt_fn(v) for v in after_vals], textposition="outside",
+                         textfont_size=10))
     fig.update_layout(barmode="group")
     return _fin(fig, title, 400)
 
@@ -838,7 +909,6 @@ def chart_incremental_bars(panel, val, title):
 def chart_migration(ev):
     d = ev.dropna(subset=["before_invest", "before_npv", "after_invest", "after_npv"])
     fig = go.Figure()
-    # connecting lines
     xs, ys = [], []
     for r in d.itertuples():
         xs += [r.before_invest, r.after_invest, None]
@@ -864,10 +934,10 @@ def chart_migration(ev):
 def chart_quadrant(ev):
     d = ev.dropna(subset=["delta_npv", "delta_invest"])
     quads = [
-        ("↑NPV ↓Capital", lambda r: r.delta_npv >= 0 and r.delta_invest <= 0, CLR["green"]),
-        ("↑NPV ↑Capital", lambda r: r.delta_npv >= 0 and r.delta_invest > 0, CLR["blue"]),
-        ("↓NPV ↓Capital", lambda r: r.delta_npv < 0 and r.delta_invest <= 0, CLR["amber"]),
-        ("↓NPV ↑Capital", lambda r: r.delta_npv < 0 and r.delta_invest > 0, CLR["red"]),
+        ("↑NPV ↓Capital", lambda r: r["delta_npv"] >= 0 and r["delta_invest"] <= 0, CLR["green"]),
+        ("↑NPV ↑Capital", lambda r: r["delta_npv"] >= 0 and r["delta_invest"] > 0, CLR["blue"]),
+        ("↓NPV ↓Capital", lambda r: r["delta_npv"] < 0 and r["delta_invest"] <= 0, CLR["amber"]),
+        ("↓NPV ↑Capital", lambda r: r["delta_npv"] < 0 and r["delta_invest"] > 0, CLR["red"]),
     ]
     fig = go.Figure()
     for qname, qfilt, qcol in quads:
@@ -888,18 +958,22 @@ def chart_quadrant(ev):
 
 # ─── PAGES ───────────────────────────────────────────────────────────────────
 
-def page_summary(ev, port, case_agg, consol, forecast, panel):
+def page_summary(ev, port, case_agg, consol, fc, panel):
     section("01", "Headline Outcome",
-            f"{len(ev):,} events · {' / '.join(f'{c[:5]} {int((ev.case==c).sum())}' for c in CASE_ORDER if (ev.case==c).any())}")
+            f"{len(ev):,} events · "
+            + " / ".join(f"{c[:5]} {int((ev.case == c).sum())}"
+                         for c in CASE_ORDER if (ev.case == c).any()))
 
     vc = port["delta_npv"]
     inv_saved = port["invest_saved"]
     eff_b, eff_a = port["before_npv_inv"], port["after_npv_inv"]
 
-    verdict = "good" if not _bad(vc) and vc > 0 else ("bad" if not _bad(vc) and vc < 0 else "info")
+    verdict = "good" if not _bad(vc) and vc > 0 else (
+        "bad" if not _bad(vc) and vc < 0 else "info")
     bits = [
         f"Inventory moves from <b>{fmt_int(port['wells_before'])}</b> wells to "
-        f"<b>{fmt_int(port['wells_after'])}</b> (<b>{fmt_int(port['wells_net'], signed=True)}</b> net)",
+        f"<b>{fmt_int(port['wells_after'])}</b> "
+        f"(<b>{fmt_int(port['wells_net'], signed=True)}</b> net)",
         f"portfolio NPV changes by <b>{fmt_money(vc, signed=True)}</b>",
     ]
     if not _bad(inv_saved):
@@ -915,7 +989,7 @@ def page_summary(ev, port, case_agg, consol, forecast, panel):
         dict(label="Before Wells", value=fmt_int(port["wells_before"])),
         dict(label="After Wells", value=fmt_int(port["wells_after"])),
         dict(label="Net Wells", value=fmt_int(port["wells_net"], signed=True),
-             tone="acc" if (port["wells_net"] or 0) <= 0 else ""),
+             tone="acc" if (not _bad(port["wells_net"]) and port["wells_net"] <= 0) else ""),
     ], 4)
     st.write("")
     kpi_grid([
@@ -924,7 +998,8 @@ def page_summary(ev, port, case_agg, consol, forecast, panel):
         dict(label="Value Created", value=fmt_money(vc, signed=True),
              dir_=_dir(vc, 1), tone="pos" if _dir(vc, 1) > 0 else "neg"),
         dict(label="NPV/Investment", value=fmt_ratio(eff_a),
-             delta=f"{fmt_ratio(eff_a - eff_b, signed=True)} vs before" if not (_bad(eff_a) or _bad(eff_b)) else None,
+             delta=(f"{fmt_ratio(eff_a - eff_b, signed=True)} vs before"
+                    if not (_bad(eff_a) or _bad(eff_b)) else None),
              dir_=_dir(eff_a - eff_b if not (_bad(eff_a) or _bad(eff_b)) else np.nan, 1),
              sub=f"Before {fmt_ratio(eff_b)}", tone="acc"),
     ], 4)
@@ -948,30 +1023,33 @@ def page_summary(ev, port, case_agg, consol, forecast, panel):
     with c1:
         show_fig(chart_bridge(ev), "sum_bridge")
     with c2:
-        show_fig(chart_waterfall_metric(ev, "npv", "NPV Waterfall — Before to After"), "sum_npvwf")
+        show_fig(chart_waterfall_metric(ev, "npv", "NPV Waterfall — Before to After"),
+                 "sum_npvwf")
 
     section("03", "Cash-Flow Trajectory", "Portfolio, undiscounted")
     if not panel.empty:
         c1, c2 = st.columns(2)
         with c1:
-            show_fig(chart_monthly(panel, "cf", "Monthly Cash Flow — Before vs After"), "sum_mcf")
+            show_fig(chart_monthly(panel, "cf", "Monthly Cash Flow — Before vs After"),
+                     "sum_mcf")
         with c2:
             fig = go.Figure()
             for pre, col, nm, dash in (("before", CLR["before"], "Before", "dash"),
                                        ("after", CLR["after"], "After", "solid"),
                                        ("incr", CLR["incr"], "Incremental", "solid")):
-                fig.add_trace(go.Scatter(x=panel["date"], y=panel[f"cum_{pre}_cf"],
-                                         name=nm, mode="lines",
-                                         line=dict(color=col, width=2.4, dash=dash)))
+                fig.add_trace(go.Scatter(
+                    x=panel["date"], y=panel[f"cum_{pre}_cf"],
+                    name=nm, mode="lines",
+                    line=dict(color=col, width=2.4, dash=dash)))
             fig.add_hline(y=0, line_color=CLR["slate"], line_width=1)
             show_fig(_fin(fig, "Cumulative Cash Flow", 400, "$", tickpre="$"), "sum_ccf")
     else:
         st.info("No forecast data matched to current events.")
 
 
-def page_economics(ev, port, case_agg, consol, forecast, panel):
+def page_economics(ev, port, case_agg, consol, fc, panel):
     section("01", "Portfolio Economics — Before vs After",
-            "Ratios recomputed from aggregates, never summed")
+            "Ratios recomputed from aggregates")
 
     rows = []
     for key, label, fmt_fn, good in METRIC_DEFS:
@@ -983,8 +1061,7 @@ def page_economics(ev, port, case_agg, consol, forecast, panel):
         if not _bad(d) and good and abs(d) > 1e-12:
             verdict = "✅ better" if np.sign(d) * good > 0 else "❌ worse"
         rows.append({
-            "Metric": label,
-            "Before": fmt_fn(b), "After": fmt_fn(a),
+            "Metric": label, "Before": fmt_fn(b), "After": fmt_fn(a),
             "Delta": fmt_fn(d, signed=True),
             "% Change": fmt_pct(pct_chg, signed=True) if not _bad(pct_chg) else DASH,
             "Direction": verdict,
@@ -994,10 +1071,10 @@ def page_economics(ev, port, case_agg, consol, forecast, panel):
     section("02", "Per-Well Normalisation",
             "Comparing 2 before-wells to 1 after-well requires per-well metrics")
     pw = []
+    fmap = {k: f for k, _, f, _ in METRIC_DEFS}
+    lmap = {k: l for k, l, _, _ in METRIC_DEFS}
     for k in ADD_KEYS:
-        fmap = {m[0]: m[2] for m in METRIC_DEFS}
         f = fmap.get(k, fmt_money)
-        lmap = {m[0]: m[1] for m in METRIC_DEFS}
         lab = lmap.get(k, k)
         b_pw = port.get(f"before_{k}_pw", np.nan)
         a_pw = port.get(f"after_{k}_pw", np.nan)
@@ -1019,17 +1096,18 @@ def page_economics(ev, port, case_agg, consol, forecast, panel):
     section("04", "Event Detail")
     disp = pd.DataFrame({
         "Event": ev["event_id"], "Case": ev["case"],
-        "Wells": ev["wells_before"].map(lambda x: f"{x:.0f}") + " → " + ev["wells_after"].map(lambda x: f"{x:.0f}"),
+        "Wells": ev["wells_before"].map(lambda x: f"{x:.0f}") + " → "
+                 + ev["wells_after"].map(lambda x: f"{x:.0f}"),
         "Before NPV": ev["before_npv"].map(fmt_money),
         "After NPV": ev["after_npv"].map(fmt_money),
         "Δ NPV": ev["delta_npv"].map(lambda x: fmt_money(x, signed=True)),
         "Δ Investment": ev["delta_invest"].map(lambda x: fmt_money(x, signed=True)),
         "NPV/I After": ev["after_npv_inv"].map(fmt_ratio),
     })
-    show_df(disp.sort_values("Δ NPV", key=lambda s: pd.to_numeric(s.str.replace(r"[^0-9.\-+]", "", regex=True), errors="coerce"), ascending=False), height=460)
+    show_df(disp, height=460)
 
 
-def page_capital(ev, port, case_agg, consol, forecast, panel):
+def page_capital(ev, port, case_agg, consol, fc, panel):
     section("01", "Capital Position")
 
     kpi_grid([
@@ -1045,7 +1123,8 @@ def page_capital(ev, port, case_agg, consol, forecast, panel):
     kpi_grid([
         dict(label="NPV/Investment Before", value=fmt_ratio(port["before_npv_inv"])),
         dict(label="NPV/Investment After", value=fmt_ratio(port["after_npv_inv"]), tone="acc"),
-        dict(label="Capital Productivity Index", value=fmt_ratio(port["cap_productivity_idx"]),
+        dict(label="Capital Productivity Index",
+             value=fmt_ratio(port["cap_productivity_idx"]),
              sub="After NPV/I ÷ Before NPV/I · >1.00x = improved"),
         dict(label="Investment / BOE", value=fmt_usdboe(port["after_inv_boe"]),
              delta=fmt_usdboe(port["delta_inv_boe"], signed=True),
@@ -1067,14 +1146,13 @@ def page_capital(ev, port, case_agg, consol, forecast, panel):
     show_fig(chart_migration(ev), "cap_mig")
 
 
-def page_cases(ev, port, case_agg, consol, forecast, panel):
+def page_cases(ev, port, case_agg, consol, fc, panel):
     section("01", "Case Archetypes", "Consolidation · Extension · Creation")
     present = [c for c in CASE_ORDER if c in case_agg]
     if not present:
         st.info("No classified events found.")
         return
 
-    # Summary table
     summary = []
     for c in present:
         r = case_agg[c]
@@ -1097,9 +1175,10 @@ def page_cases(ev, port, case_agg, consol, forecast, panel):
         with tab:
             r = case_agg[case]
             sub = ev[ev["case"] == case]
-            st.markdown(f'<span class="pill" style="background:{CASE_CLR[case]}">{case}</span>'
-                        f'<span style="color:#7A8A99;font-size:.85rem">{len(sub):,} events</span>',
-                        unsafe_allow_html=True)
+            st.markdown(
+                f'<span class="pill" style="background:{CASE_CLR[case]}">{case}</span>'
+                f'<span style="color:#7A8A99;font-size:.85rem">{len(sub):,} events</span>',
+                unsafe_allow_html=True)
 
             kpi_grid([
                 dict(label="Events", value=fmt_int(r["n_events"]), tone="acc"),
@@ -1114,11 +1193,11 @@ def page_cases(ev, port, case_agg, consol, forecast, panel):
                 _metric_card("inv_boe", r["before_inv_boe"], r["after_inv_boe"]),
             ], 4)
 
-            # Economics table for this case
             st.markdown("**Economics Comparison**")
             rows = []
             for key, label, fmt_fn, good in METRIC_DEFS:
-                b, a = r.get(f"before_{key}", np.nan), r.get(f"after_{key}", np.nan)
+                b = r.get(f"before_{key}", np.nan)
+                a = r.get(f"after_{key}", np.nan)
                 d = (a - b) if not (_bad(a) or _bad(b)) else np.nan
                 rows.append({"Metric": label, "Before": fmt_fn(b), "After": fmt_fn(a),
                              "Delta": fmt_fn(d, signed=True)})
@@ -1127,29 +1206,29 @@ def page_cases(ev, port, case_agg, consol, forecast, panel):
             with c1:
                 show_df(pd.DataFrame(rows), height=430)
             with c2:
-                # case-level forecast
                 case_events = set(sub["event_id"])
-                cpanel = _build_forecast_panel(consol, forecast, case_events)
+                cpanel = _build_forecast_panel(consol, fc, case_events)
                 if not cpanel.empty:
-                    show_fig(chart_monthly(cpanel, "cf", f"{case} — Monthly Cash Flow"), f"cs_cf_{case}")
+                    show_fig(chart_monthly(cpanel, "cf", f"{case} — Monthly Cash Flow"),
+                             f"cs_cf_{case}")
                 else:
                     st.info("No forecast coverage for this case.")
 
-            # Top contributors
             st.markdown("**Top Contributors**")
+            top = sub.sort_values("delta_npv", ascending=False).head(20)
             disp = pd.DataFrame({
-                "Event": sub["event_id"], "Wells": sub["wells_before"].map(lambda x: f"{x:.0f}") + " → 1",
-                "Before NPV": sub["before_npv"].map(fmt_money),
-                "After NPV": sub["after_npv"].map(fmt_money),
-                "Δ NPV": sub["delta_npv"].map(lambda x: fmt_money(x, signed=True)),
-                "Δ Investment": sub["delta_invest"].map(lambda x: fmt_money(x, signed=True)),
-                "NPV/I After": sub["after_npv_inv"].map(fmt_ratio),
+                "Event": top["event_id"],
+                "Wells": top["wells_before"].map(lambda x: f"{x:.0f}") + " → 1",
+                "Before NPV": top["before_npv"].map(fmt_money),
+                "After NPV": top["after_npv"].map(fmt_money),
+                "Δ NPV": top["delta_npv"].map(lambda x: fmt_money(x, signed=True)),
+                "Δ Investment": top["delta_invest"].map(lambda x: fmt_money(x, signed=True)),
+                "NPV/I After": top["after_npv_inv"].map(fmt_ratio),
             })
-            show_df(disp.sort_values("Δ NPV", key=lambda s: pd.to_numeric(
-                s.str.replace(r"[^0-9.\-+]", "", regex=True), errors="coerce"), ascending=False).head(20))
+            show_df(disp)
 
 
-def page_forecast(ev, port, case_agg, consol, forecast, panel):
+def page_forecast(ev, port, case_agg, consol, fc, panel):
     section("01", "Forecast Analysis", "Monthly cash flow, revenue, operating income")
     if panel.empty:
         st.warning("No forecast data matched to events.")
@@ -1164,7 +1243,8 @@ def page_forecast(ev, port, case_agg, consol, forecast, panel):
             with c1:
                 show_fig(chart_monthly(panel, val, f"Monthly {lab}"), f"fc_m_{val}")
             with c2:
-                show_fig(chart_incremental_bars(panel, val, f"Incremental {lab} + Cumulative"),
+                show_fig(chart_incremental_bars(panel, val,
+                                                f"Incremental {lab} + Cumulative"),
                          f"fc_i_{val}")
 
     section("03", "Cumulative Cash Flow")
@@ -1172,15 +1252,18 @@ def page_forecast(ev, port, case_agg, consol, forecast, panel):
     for pre, col, nm, dash in (("before", CLR["before"], "Before", "dash"),
                                ("after", CLR["after"], "After", "solid"),
                                ("incr", CLR["incr"], "Incremental", "solid")):
-        fig.add_trace(go.Scatter(x=panel["date"], y=panel[f"cum_{pre}_cf"], name=nm,
-                                 mode="lines", line=dict(color=col, width=2.4, dash=dash)))
+        fig.add_trace(go.Scatter(
+            x=panel["date"], y=panel[f"cum_{pre}_cf"], name=nm, mode="lines",
+            line=dict(color=col, width=2.4, dash=dash)))
     fig.add_hline(y=0, line_color=CLR["slate"], line_width=1)
     show_fig(_fin(fig, "Cumulative Cash Flow", 420, "$", tickpre="$"), "fc_cum")
 
     section("04", "Annual Summary")
     ann = panel.groupby("year").agg(
-        before_revenue=("before_revenue", "sum"), after_revenue=("after_revenue", "sum"),
-        before_cf=("before_cf", "sum"), after_cf=("after_cf", "sum"),
+        before_revenue=("before_revenue", "sum"),
+        after_revenue=("after_revenue", "sum"),
+        before_cf=("before_cf", "sum"),
+        after_cf=("after_cf", "sum"),
         incr_cf=("incr_cf", "sum")).reset_index()
     ann["cum_incr_cf"] = ann["incr_cf"].cumsum()
     disp = pd.DataFrame({
@@ -1195,20 +1278,22 @@ def page_forecast(ev, port, case_agg, consol, forecast, panel):
     show_df(disp, height=420)
 
 
-def page_event_explorer(ev, port, case_agg, consol, forecast, panel):
+def page_event_explorer(ev, port, case_agg, consol, fc, panel):
     section("01", "Event Explorer")
     if ev.empty:
         st.info("No events loaded.")
         return
 
-    lbl_map = {r["event_id"]: f"{r['event_id']}  ·  {r['case']}  ·  {fmt_money(r['delta_npv'], signed=True)}"
+    lbl_map = {r["event_id"]: (f"{r['event_id']}  ·  {r['case']}  ·  "
+                                f"{fmt_money(r['delta_npv'], signed=True)}")
                for _, r in ev.iterrows()}
-    pick = st.selectbox("Event", list(ev["event_id"]), format_func=lambda k: lbl_map.get(k, k))
+    pick = st.selectbox("Event", list(ev["event_id"]),
+                        format_func=lambda k: lbl_map.get(k, k))
     r = ev[ev["event_id"] == pick].iloc[0]
 
     st.markdown(
-        f'<span class="pill" style="background:{CASE_CLR.get(r["case"], CLR["slate"])}">{r["case"]}</span>',
-        unsafe_allow_html=True)
+        f'<span class="pill" style="background:{CASE_CLR.get(r["case"], CLR["slate"])}">'
+        f'{r["case"]}</span>', unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -1222,7 +1307,8 @@ def page_event_explorer(ev, port, case_agg, consol, forecast, panel):
     with c3:
         st.markdown("**After — Enhanced Well**")
         st.write(f"`{r['enh_ent']}`")
-        st.caption(f"Wells: {r['wells_before']:.0f} → {r['wells_after']:.0f} ({fmt_int(r['wells_net'], signed=True)})")
+        st.caption(f"Wells: {r['wells_before']:.0f} → {r['wells_after']:.0f} "
+                   f"({fmt_int(r['wells_net'], signed=True)})")
 
     kpi_grid([
         _metric_card("npv", r["before_npv"], r["after_npv"]),
@@ -1235,19 +1321,18 @@ def page_event_explorer(ev, port, case_agg, consol, forecast, panel):
         _metric_card("inv_boe", r["before_inv_boe"], r["after_inv_boe"]),
     ], 4)
 
-    # Full metrics table
     st.markdown("**Full Economics**")
     rows = []
     for key, label, fmt_fn, good in METRIC_DEFS:
-        b, a = r.get(f"before_{key}", np.nan), r.get(f"after_{key}", np.nan)
+        b = r.get(f"before_{key}", np.nan)
+        a = r.get(f"after_{key}", np.nan)
         d = (a - b) if not (_bad(a) or _bad(b)) else np.nan
         rows.append({"Metric": label, "Before": fmt_fn(b), "After": fmt_fn(a),
                      "Delta": fmt_fn(d, signed=True)})
     show_df(pd.DataFrame(rows), height=430)
 
-    # Event-level forecast
     section("02", "Event Cash Flow")
-    ep = _build_forecast_panel(consol, forecast, {pick})
+    ep = _build_forecast_panel(consol, fc, {pick})
     if ep.empty:
         st.info("No forecast rows matched to this event.")
     else:
@@ -1275,19 +1360,28 @@ PAGES = {
 def main():
     header()
 
-    # load data
     try:
-        ev_df, consol, econ, forecast, capex = build_events()
-    except FileNotFoundError as e:
+        ev_df, consol, econ, fc, capex, debug = build_events()
+    except (FileNotFoundError, ValueError) as e:
         st.error(str(e))
         st.info("Place `economics.xlsx`, `consol.xlsx`, `forecast.xlsx`, and `capex.xlsx` "
                 "next to `app.py` or in a `./data` subfolder.")
         return
 
     if ev_df.empty:
-        st.warning("No classifiable events found in consol.xlsx. Check that `well 1 entity`, "
-                   "`well 2 entity`, and `enhanced well entity` columns are populated.")
+        st.warning("No classifiable events found in consol.xlsx.")
+        # Show debug info
+        with st.expander("Debug — data loading diagnostics"):
+            st.write(f"Economics entities loaded: {debug['econ_count']}")
+            st.write(f"Capex entities loaded: {debug['capex_count']}")
+            st.write(f"Consol rows loaded: {debug['consol_count']}")
+            st.write(f"Forecast rows loaded: {debug['fc_count']}")
+            st.write(f"Sample economics entity keys: {debug['sample_econ_keys']}")
         return
+
+    # Show join diagnostics in sidebar
+    n_enh_found = ev_df["enh_found"].sum() if "enh_found" in ev_df else 0
+    n_total = len(ev_df)
 
     # sidebar
     sb = st.sidebar
@@ -1297,11 +1391,16 @@ def main():
     sb.markdown("### Scope")
     cases = sb.multiselect("Event Cases", CASE_ORDER, default=CASE_ORDER)
     sb.markdown("---")
+    sb.caption(f"**{debug['econ_count']}** economics entities")
+    sb.caption(f"**{debug['capex_count']}** capex entities")
+    sb.caption(f"**{n_total}** events ({n_enh_found} enhanced found in econ)")
+    sb.caption(f"**{debug['fc_count']}** forecast rows")
+    sb.markdown("---")
     if sb.button("🔄 Reload Data"):
         st.cache_data.clear()
         st.rerun()
 
-    # filter
+    # filter by selected cases
     ev = ev_df[ev_df["case"].isin(cases)].copy()
     if ev.empty:
         st.warning("No events match the selected cases.")
@@ -1310,7 +1409,7 @@ def main():
     # portfolio aggregate
     port = _aggregate_events(ev)
 
-    # case aggregates (dict of case -> series)
+    # case aggregates
     case_agg = {}
     for c in CASE_ORDER:
         sub = ev[ev["case"] == c]
@@ -1318,14 +1417,14 @@ def main():
             case_agg[c] = _aggregate_events(sub)
 
     # forecast panel
-    panel = _build_forecast_panel(consol, forecast, set(ev["event_id"]))
+    panel = _build_forecast_panel(consol, fc, set(ev["event_id"]))
 
-    # render page
-    PAGES[page](ev, port, case_agg, consol, forecast, panel)
+    # render
+    PAGES[page](ev, port, case_agg, consol, fc, panel)
 
-    # footer
     st.markdown("---")
-    st.caption(f"{len(ev):,} events · money in base dollars (economics ×{ECON_MONEY_SCALE:g})")
+    st.caption(f"{len(ev):,} events · money in base $ "
+               f"(economics ×{ECON_MONEY_SCALE:g})")
 
 
 if __name__ == "__main__":
