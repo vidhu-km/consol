@@ -749,31 +749,6 @@ def render_portfolio_overview(econ: pd.DataFrame):
     fig_wf.update_layout(showlegend=False)
     st.plotly_chart(fig_wf, use_container_width=True)
 
-    # ── Comparison scatter ────────────────────────────────────────────────
-    st.subheader("Capex vs. NPV10 by Event Type")
-    scatter_df = filtered.copy()
-    scatter_df["Capex ($MM)"] = scatter_df["new_capex_dollars"] / 1e6
-    scatter_df["NPV10 ($MM)"] = scatter_df["new_npv10_dollars"] / 1e6
-    scatter_df["Reserves (Mboe)"] = scatter_df["new_reserves_boe"] / 1e3
-    fig_sc = px.scatter(
-        scatter_df,
-        x="Capex ($MM)",
-        y="NPV10 ($MM)",
-        color="event_type",
-        size="Reserves (Mboe)",
-        hover_data=["event", COL_NEW_CURVE],
-        color_discrete_map=CATEGORY_COLORS,
-        size_max=30,
-    )
-    _apply_layout(fig_sc, "Capex vs. NPV10 — All Events", "Capex ($MM)", "NPV10 ($MM)")
-    fig_sc.add_shape(
-        type="line", x0=0, x1=scatter_df["Capex ($MM)"].max() * 1.1,
-        y0=0, y1=scatter_df["Capex ($MM)"].max() * 1.1,
-        line=dict(dash="dot", color="#94A3B8", width=1),
-    )
-    st.plotly_chart(fig_sc, use_container_width=True)
-
-
 # ── 2. CONSOLIDATION DEEP-DIVE ───────────────────────────────────────────────
 def render_consolidation(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
     st.title("🔵 Consolidation — Capital Removal")
