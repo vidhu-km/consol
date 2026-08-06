@@ -991,24 +991,6 @@ def render_creation(econ: pd.DataFrame):
     _apply_layout(fig, "NPV10 Added per New Well ($MM)", "Event #", "$MM")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Payout vs ROR scatter
-    st.markdown("#### Returns Profile: Payout vs. ROR")
-    prof_df = df.copy()
-    prof_df["Payout (yrs)"] = prof_df["new_payout_years"]
-    prof_df["ROR (%)"] = prof_df["new_ror_pct"]
-    prof_df["NPV10 ($MM)"] = prof_df["new_npv10_dollars"] / 1e6
-    fig2 = px.scatter(
-        prof_df,
-        x="Payout (yrs)",
-        y="ROR (%)",
-        size="NPV10 ($MM)",
-        hover_data=["event", COL_NEW_CURVE],
-        color_discrete_sequence=[PAL_CREATION],
-        size_max=28,
-    )
-    _apply_layout(fig2, "Payout vs. ROR — New Wells", "Payout (years)", "ROR (%)")
-    st.plotly_chart(fig2, use_container_width=True)
-
     # Detail table
     with st.expander("📋 Event Detail Table", expanded=False):
         detail = df[[
