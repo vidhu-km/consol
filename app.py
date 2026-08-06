@@ -880,37 +880,6 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     cd3.metric("Reserves Change", fmt_mboe(consol["reserves_delta_boe"].sum()))
     cd4.metric("OI Change", fmt_mm(consol["operating_income_delta_dollars"].sum()))
 
-    # Charts
-    col_l, col_r = st.columns(2)
-    with col_l:
-        if len(consol) > 0:
-            df_ranked = consol.sort_values("npv10_delta_dollars", ascending=False).copy()
-            df_ranked["event_label"] = df_ranked["event"].astype(str)
-            df_ranked["color"] = df_ranked["npv10_delta_dollars"].apply(lambda x: COLOR_POSITIVE if x >= 0 else COLOR_NEGATIVE)
-            fig = go.Figure(go.Bar(
-                x=df_ranked["event_label"],
-                y=df_ranked["npv10_delta_dollars"] / 1e6,
-                marker_color=df_ranked["color"],
-                hovertemplate="Event %{x}<br>NPV Uplift: $%{y:.2f} MM<extra></extra>"
-            ))
-            _base_layout(fig, "Consolidation NPV10 Uplift by Event", "Event #", "NPV10 Uplift ($MM)")
-            fig.add_hline(y=0, line_dash="dash", line_color="gray")
-            st.plotly_chart(fig, use_container_width=True)
-
-    with col_r:
-        if len(consol) > 0:
-            fig2 = px.scatter(
-                consol, x=consol["capex_delta_dollars"] / 1e6,
-                y=consol["npv10_delta_dollars"] / 1e6,
-                size=consol["new_reserves_boe"].clip(lower=1),
-                hover_data={"event": True},
-                labels={"x": "Capital Delta ($MM)", "y": "NPV10 Delta ($MM)"},
-            )
-            _base_layout(fig2, "Capital vs NPV Delta (Consolidations)", "Capital Delta ($MM)", "NPV10 Delta ($MM)")
-            fig2.add_hline(y=0, line_dash="dash", line_color="gray")
-            fig2.add_vline(x=0, line_dash="dash", line_color="gray")
-            st.plotly_chart(fig2, use_container_width=True)
-
     # --- Section C: Inventory Enhancements ---
     st.subheader("Inventory Enhancements Identified (Extensions)")
     if len(ext) > 0:
