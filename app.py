@@ -678,18 +678,20 @@ def render_portfolio_overview(econ: pd.DataFrame):
     avg_old_cor = consol["old_cost_of_reserves_derived"].mean()
     c1.metric("Capital Saved", _f_mm(total_cap_saved), help="Old plan Capex minus new plan Capex")
     c2.metric(
-        "Avg $/boe Improvement",
-        _f_dollarboe(avg_cor_improv),
-        help="Average reduction in cost-of-reserves (old − new) per barrel",
+        "Old Average Cost/boe",
+        _f_dollarboe(avg_old_cor),
+        help="Average cost of reserves for the old plan",
     )
     c3.metric(
-        "New Avg Cost of Reserves",
+        "New Average Cost/boe",
         _f_dollarboe(avg_new_cor),
-        delta=f"{_f_dollarboe(avg_new_cor - avg_old_cor) if not np.isnan(avg_old_cor) else 'N/A'} vs old",
-        delta_color="inverse",
-        help="Lower is better",
+        help="Average cost of reserves for the new plan",
     )
-    c4.metric("Avg NPV/Investment", _f_ratio(consol["new_npv_inv_ratio"].mean()))
+    c4.metric(
+        "$/boe Saved",
+        _f_dollarboe(avg_cor_improv),
+        help="Average reduction in cost per boe (old - new)",
+    )
 
     st.markdown("---")
 
