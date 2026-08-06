@@ -898,19 +898,16 @@ def render_extension(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
 
     # Incremental efficiency scatter
     st.markdown("#### Capital Efficiency: Incremental Capex vs. Incremental NPV10")
-    eff_df = df.copy()
-    eff_df["Inc. Capex ($MM)"] = eff_df["incremental_capex_dollars"] / 1e6
-    eff_df["Inc. NPV10 ($MM)"] = eff_df["incremental_npv10_dollars"] / 1e6
-    eff_df["Inc. Reserves (Mboe)"] = eff_df["incremental_reserves_boe"] / 1e3
+    eff_df["Bubble Size"] = eff_df["Inc. Reserves (Mboe)"].abs()
     fig2 = px.scatter(
-        eff_df,
-        x="Inc. Capex ($MM)",
-        y="Inc. NPV10 ($MM)",
-        size="Inc. Reserves (Mboe)",
-        hover_data=["event", COL_NEW_CURVE],
-        color_discrete_sequence=[PAL_EXTENSION],
-        size_max=28,
-    )
+    eff_df,
+    x="Inc. Capex ($MM)",
+    y="Inc. NPV10 ($MM)",
+    size="Bubble Size",
+    hover_data=["event", COL_NEW_CURVE, "Inc. Reserves (Mboe)"],
+    color_discrete_sequence=[PAL_EXTENSION],
+    size_max=28,
+)
     _apply_layout(fig2, "Incremental Capital vs. Incremental NPV10", "Incremental Capex ($MM)", "Incremental NPV10 ($MM)")
     # 1:1 reference line
     max_val = max(
