@@ -1106,32 +1106,6 @@ def render_existing_plan_optimization(econ: pd.DataFrame, event_forecasts: pd.Da
     mc9.metric("New Reserves", fmt_mboe(filtered["new_reserves_boe"].sum()))
     mc10.metric("Reserves Change", fmt_signed_mboe(filtered["reserves_delta_boe"].sum()))
 
-    # Charts
-    col_l, col_r = st.columns(2)
-    with col_l:
-        df_r = filtered.sort_values("npv10_delta_dollars", ascending=False)
-        colors = [COLOR_POSITIVE if v >= 0 else COLOR_NEGATIVE for v in df_r["npv10_delta_dollars"]]
-        fig = go.Figure(go.Bar(
-            x=df_r["event"].astype(str), y=df_r["npv10_delta_dollars"] / 1e6,
-            marker_color=colors,
-            hovertemplate="Event %{x}<br>NPV Uplift: $%{y:.2f} MM<extra></extra>",
-        ))
-        _base_layout(fig, "NPV10 Uplift by Event", "Event #", "NPV10 Uplift ($MM)")
-        fig.add_hline(y=0, line_dash="dash", line_color="gray")
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col_r:
-        df_r2 = filtered.sort_values("capex_delta_dollars", ascending=True)
-        colors2 = [COLOR_POSITIVE if v < 0 else COLOR_NEGATIVE for v in df_r2["capex_delta_dollars"]]
-        fig2 = go.Figure(go.Bar(
-            x=df_r2["event"].astype(str), y=df_r2["capex_delta_dollars"] / 1e6,
-            marker_color=colors2,
-        ))
-        _base_layout(fig2, "Capital Delta by Event", "Event #", "Capital Delta ($MM)")
-        fig2.add_hline(y=0, line_dash="dash", line_color="gray")
-        st.plotly_chart(fig2, use_container_width=True)
-
-
     # Event table
     st.subheader("Event Detail Table")
     display_cols = [
@@ -1186,16 +1160,6 @@ def render_inventory_opportunities(econ: pd.DataFrame):
                 fig.add_hline(y=0, line_dash="dash", line_color="gray")
                 st.plotly_chart(fig, use_container_width=True)
 
-            with col_r:
-                fig2 = px.scatter(
-                    ext, x=ext["capex_delta_dollars"] / 1e6,
-                    y=ext["npv10_delta_dollars"] / 1e6,
-                    size=ext["reserves_delta_boe"].clip(lower=1).values,
-                    hover_data={"event": True},
-                )
-                _base_layout(fig2, "Incremental Capital vs Incremental NPV", "Incremental Capital ($MM)", "Incremental NPV10 ($MM)")
-                st.plotly_chart(fig2, use_container_width=True)
-
             st.subheader("Extension Detail Table")
             display_cols = [
                 "event", COL_OLD_CURVE_1, COL_OLD_CURVE_2, COL_NEW_CURVE,
@@ -1238,17 +1202,6 @@ def render_inventory_opportunities(econ: pd.DataFrame):
                 ))
                 _base_layout(fig, "New Inventory NPV10 by Event", "Event #", "NPV10 ($MM)")
                 st.plotly_chart(fig, use_container_width=True)
-
-            with col_r:
-                fig2 = px.scatter(
-                    cre, x=cre["new_capex_dollars"] / 1e6,
-                    y=cre["new_reserves_boe"] / 1e3,
-                    color=cre[COL_NEW_CURVE],
-                    hover_data={"event": True},
-                    labels={"x": "Capital ($MM)", "y": "Reserves (Mboe)", "color": "Type Curve"},
-                )
-                _base_layout(fig2, "New Inventory: Capital vs Reserves", "Capital ($MM)", "Reserves (Mboe)")
-                st.plotly_chart(fig2, use_container_width=True)
 
             st.subheader("Creation Detail Table")
             display_cols = [
