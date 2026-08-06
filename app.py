@@ -913,7 +913,6 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     ext = econ[econ["event_type"] == "Extension"]
     cre = econ[econ["event_type"] == "Creation"]
 
-    # --- Headline: Capital Efficiency ---
     total_capital_saved = consol["capital_saved_dollars"].sum()
     total_boe_lost = consol["boe_lost"].sum()
     portfolio_saved_per_boe_lost = _safe_div(total_capital_saved, total_boe_lost)
@@ -927,7 +926,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
         + cre["incremental_npv10_added_dollars"].sum()
     )
 
-    st.subheader("Capital Efficiency Headline")
+    st.subheader("Capital Efficiency")
     h1, h2, h3, h4, h5 = st.columns(5)
     h1.metric("Capital Saved", fmt_mm(total_capital_saved))
     h2.metric("Capital Saved per BOE Lost", fmt_dollarboe(portfolio_saved_per_boe_lost))
@@ -952,7 +951,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     )
 
     # --- Section A: Overall  ---
-    st.subheader("Portfolio Context")
+    st.subheader("Portfolio Changes")
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Total Events", f"{len(econ):,}")
     c2.metric("Existing Plan Optimizations", f"{len(consol):,}")
@@ -967,7 +966,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     )
 
     # --- Section B:  Value Mix ---
-    st.subheader(" Value Mix")
+    st.subheader(" Value Breakdown")
     value_mix = pd.DataFrame({
         "Category": [
             "Existing Plan Optimization",
@@ -991,7 +990,6 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
             hole=0.35,
         ))
         fig_mix.update_layout(
-            title="Share of Positive  Value",
             template="plotly_white",
             margin=dict(l=30, r=30, t=60, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=-0.15),
