@@ -880,7 +880,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     c1.metric("Total Events", f"{len(econ):,}")
     c2.metric("Existing Plan Optimizations", f"{len(consol):,}")
     c3.metric("Inventory Enhancements", f"{len(ext):,}")
-    c4.metric("New Inventory Locations", f"{len(cre):,}")
+    c4.metric("New Inventory Locations", f"{leny(cre):,}")
     c5.metric(" Value Change ", fmt_signed_mm(total_val))
     c6.metric(" Capital Change (+ added / - saved)", fmt_signed_mm(total_cap))
     st.caption(
