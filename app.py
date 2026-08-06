@@ -877,7 +877,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     # --- Section A: Overall  ---
     st.subheader("Overall ")
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Total Events ed", f"{len(econ):,}")
+    c1.metric("Total Events", f"{len(econ):,}")
     c2.metric("Existing Plan Optimizations", f"{len(consol):,}")
     c3.metric("Inventory Enhancements", f"{len(ext):,}")
     c4.metric("New Inventory Locations", f"{len(cre):,}")
