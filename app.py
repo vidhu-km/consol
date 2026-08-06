@@ -906,7 +906,6 @@ def _base_layout(fig: go.Figure, title: str, xaxis: str = "", yaxis: str = ""):
 # ════════════════════════════════════════════════════════════════════════════════
 
 def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, event_forecasts: pd.DataFrame):
-    st.header("Capital Efficiency")
     st.caption("How many dollars of capital did we free up while preserving development value?")
 
     consol = econ[econ["event_type"] == "Consolidation"]
@@ -1503,13 +1502,13 @@ def render_downloads(
 
 def main():
     st.set_page_config(
-        page_title="Viewfield Bakken Capital Efficiency",
+        page_title="VFB 2026 Inventory Overhaul",
         page_icon="📈",
         layout="wide",
         initial_sidebar_state="expanded",
     )
 
-    st.sidebar.title("Viewfield Bakken ")
+    st.sidebar.title("Contents")
 
     # -- Check workbook exists --
     if not WORKBOOK_PATH.exists():
