@@ -558,6 +558,27 @@ def build_event_economics(
             _safe_div(new_capex, new_reserves) - _safe_div(old_capex, old_reserves)
             if old_reserves > 0 else np.nan
         )
+
+        # Capital-efficiency fields. These preserve the existing old/new calculation approach
+        # while expressing favorable outcomes as positive values for dashboard reporting.
+        is_consolidation = ev["event_type"] == "Consolidation"
+        is_inventory_add = ev["event_type"] in {"Extension", "Creation"}
+        ev["capital_saved_dollars"] = max(old_capex - new_capex, 0.0) if is_consolidation else 0.0
+        ev["boe_lost"] = max(old_reserves - new_reserves, 0.0) if is_consolidation else 0.0
+        ev["capital_saved_per_boe_lost"] = (
+            _safe_div(ev["capital_saved_dollars"], ev["boe_lost"])
+            if is_consolidation and ev["boe_lost"] > 0 else np.nan
+        )
+        ev["cost_of_reserves_improvement"] = (
+            _safe_div(old_capex, old_reserves) - _safe_div(new_capex, new_reserves)
+            if is_consolidation and old_reserves > 0 and new_reserves > 0 else np.nan
+        )
+        ev["locations_eliminated"] = max(int(row["old_curve_count"]) - 1, 0) if is_consolidation else 0
+        ev["npv_sacrificed_dollars"] = max(old_npv10 - new_npv10, 0.0) if is_consolidation else 0.0
+        ev["incremental_npv10_added_dollars"] = (
+            (new_npv10 - old_npv10) if ev["event_type"] == "Extension"
+            else new_npv10 if ev["event_type"] == "Creation" else 0.0
+        )
         ev["old_npv_inv_ratio_derived"] = _safe_div(old_npv10, old_capex)
         ev["new_npv_inv_ratio_derived"] = _safe_div(new_npv10, new_capex)
         ev["old_lifetime_oi_per_boe"] = _safe_div(old_lt_oi, old_reserves)
@@ -697,14 +718,35 @@ def build_executive_summary(econ: pd.DataFrame) -> pd.DataFrame:
             r["primary_value_dollars"] = sub["npv10_delta_dollars"].sum()
             r["capital_dollars"] = sub["capex_delta_dollars"].sum()
             r["reserves_boe"] = sub["reserves_delta_boe"].sum()
+            r["capital_saved_dollars"] = sub["capital_saved_dollars"].sum()
+            r["boe_lost"] = sub["boe_lost"].sum()
+            r["capital_saved_per_boe_lost"] = _safe_div(r["capital_saved_dollars"], r["boe_lost"])
+            r["cost_of_reserves_improvement"] = (
+                _safe_div(sub["old_capex_dollars"].sum(), sub["old_reserves_boe"].sum())
+                - _safe_div(sub["new_capex_dollars"].sum(), sub["new_reserves_boe"].sum())
+            )
+            r["locations_eliminated"] = int(sub["locations_eliminated"].sum())
+            r["incremental_npv10_added_dollars"] = 0.0
         elif et == "Extension":
             r["primary_value_dollars"] = sub["npv10_delta_dollars"].sum()
             r["capital_dollars"] = sub["capex_delta_dollars"].sum()
             r["reserves_boe"] = sub["reserves_delta_boe"].sum()
+            r["capital_saved_dollars"] = 0.0
+            r["boe_lost"] = 0.0
+            r["capital_saved_per_boe_lost"] = np.nan
+            r["cost_of_reserves_improvement"] = np.nan
+            r["locations_eliminated"] = 0
+            r["incremental_npv10_added_dollars"] = sub["incremental_npv10_added_dollars"].sum()
         else:
             r["primary_value_dollars"] = sub["new_npv10_dollars"].sum()
             r["capital_dollars"] = sub["new_capex_dollars"].sum()
             r["reserves_boe"] = sub["new_reserves_boe"].sum()
+            r["capital_saved_dollars"] = 0.0
+            r["boe_lost"] = 0.0
+            r["capital_saved_per_boe_lost"] = np.nan
+            r["cost_of_reserves_improvement"] = np.nan
+            r["locations_eliminated"] = 0
+            r["incremental_npv10_added_dollars"] = sub["incremental_npv10_added_dollars"].sum()
         rows.append(r)
 
     total = {
@@ -714,6 +756,14 @@ def build_executive_summary(econ: pd.DataFrame) -> pd.DataFrame:
         "primary_value_dollars": sum(r["primary_value_dollars"] for r in rows),
         "capital_dollars": sum(r["capital_dollars"] for r in rows),
         "reserves_boe": sum(r["reserves_boe"] for r in rows),
+        "capital_saved_dollars": sum(r["capital_saved_dollars"] for r in rows),
+        "boe_lost": sum(r["boe_lost"] for r in rows),
+        "capital_saved_per_boe_lost": _safe_div(
+            sum(r["capital_saved_dollars"] for r in rows), sum(r["boe_lost"] for r in rows)
+        ),
+        "cost_of_reserves_improvement": rows[0]["cost_of_reserves_improvement"] if rows else np.nan,
+        "locations_eliminated": sum(r["locations_eliminated"] for r in rows),
+        "incremental_npv10_added_dollars": sum(r["incremental_npv10_added_dollars"] for r in rows),
     }
     rows.append(total)
     return pd.DataFrame(rows)
@@ -856,12 +906,59 @@ def _base_layout(fig: go.Figure, title: str, xaxis: str = "", yaxis: str = ""):
 # ════════════════════════════════════════════════════════════════════════════════
 
 def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, event_forecasts: pd.DataFrame):
-    st.header("Viewfield Bakken Exploitation ")
-    st.caption("Development-plan optimization and inventory opportunities identified")
+    st.header("Capital Efficiency")
+    st.caption("How many dollars of capital did we free up while preserving development value?")
 
     consol = econ[econ["event_type"] == "Consolidation"]
     ext = econ[econ["event_type"] == "Extension"]
     cre = econ[econ["event_type"] == "Creation"]
+
+    # --- Headline: Capital Efficiency ---
+    total_capital_saved = consol["capital_saved_dollars"].sum()
+    total_boe_lost = consol["boe_lost"].sum()
+    portfolio_saved_per_boe_lost = _safe_div(total_capital_saved, total_boe_lost)
+    portfolio_old_cor = _safe_div(consol["old_capex_dollars"].sum(), consol["old_reserves_boe"].sum())
+    portfolio_new_cor = _safe_div(consol["new_capex_dollars"].sum(), consol["new_reserves_boe"].sum())
+    portfolio_cor_improvement = (portfolio_old_cor - portfolio_new_cor
+                                 if pd.notna(portfolio_old_cor) and pd.notna(portfolio_new_cor) else np.nan)
+    total_locations_eliminated = int(consol["locations_eliminated"].sum())
+    total_incremental_npv_added = (
+        ext["incremental_npv10_added_dollars"].sum()
+        + cre["incremental_npv10_added_dollars"].sum()
+    )
+
+    st.subheader("Capital Efficiency Headline")
+    h1, h2, h3, h4, h5 = st.columns(5)
+    h1.metric("Capital Saved", fmt_mm(total_capital_saved))
+    h2.metric("Capital Saved per BOE Lost", fmt_dollarboe(portfolio_saved_per_boe_lost))
+    h3.metric("Cost of Reserves Improvement", fmt_dollarboe(portfolio_cor_improvement))
+    h4.metric("Locations Eliminated", f"{total_locations_eliminated:,}")
+    h5.metric("Incremental NPV10 Added", fmt_mm(total_incremental_npv_added))
+
+    st.caption(
+        "Capital Saved, BOE Lost, cost-of-reserves improvement, and locations eliminated are based on consolidations. "
+        "Incremental NPV10 Added combines extension NPV10 deltas and creation NPV10."
+    )
+
+    if len(consol) > 0:
+        ce_chart = consol.copy()
+        ce_chart["event_label"] = ce_chart["event"].astype(str)
+        fig_ce = px.scatter(
+            ce_chart,
+            x=ce_chart["npv_sacrificed_dollars"] / 1e6,
+            y=ce_chart["capital_saved_dollars"] / 1e6,
+            size=ce_chart["locations_eliminated"].clip(lower=1),
+            hover_name="event_label",
+            hover_data={
+                "capital_saved_per_boe_lost": ":.2f",
+                "cost_of_reserves_improvement": ":.2f",
+                "boe_lost": ":,.0f",
+            },
+            labels={"x": "NPV10 Sacrificed ($MM)", "y": "Capital Saved ($MM)"},
+        )
+        _base_layout(fig_ce, "Capital Saved versus NPV10 Sacrificed",
+                     "NPV10 Sacrificed ($MM)", "Capital Saved ($MM)")
+        st.plotly_chart(fig_ce, use_container_width=True)
 
     total_val = (
         consol["npv10_delta_dollars"].sum()
@@ -875,7 +972,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     )
 
     # --- Section A: Overall  ---
-    st.subheader("Overall ")
+    st.subheader("Portfolio Context")
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Total Events", f"{len(econ):,}")
     c2.metric("Existing Plan Optimizations", f"{len(consol):,}")
@@ -929,16 +1026,16 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     st.subheader("Existing Plan Optimization (Consolidations)")
     cb1, cb2, cb3, cb4 = st.columns(4)
     cb1.metric("Consolidation Events", f"{len(consol):,}")
-    cb2.metric("One-Mile Locations Replaced", f"{2 * len(consol):,}")
-    cb3.metric("Two-Mile Locations", f"{len(consol):,}")
-    cb4.metric("Net Location Reduction", f"{len(consol):,}")
+    cb2.metric("Capital Saved", fmt_mm(consol["capital_saved_dollars"].sum()))
+    cb3.metric("Capital Saved per BOE Lost", fmt_dollarboe(_safe_div(
+        consol["capital_saved_dollars"].sum(), consol["boe_lost"].sum())))
+    cb4.metric("Locations Eliminated", f"{int(consol['locations_eliminated'].sum()):,}")
 
     cd1, cd2, cd3, cd4 = st.columns(4)
     cd1.metric("NPV10 Change", fmt_signed_mm(consol["npv10_delta_dollars"].sum()))
-    cap_delta_sum = consol["capex_delta_dollars"].sum()
-    cd2.metric("Capital Change (+ added / - saved)", fmt_signed_mm(cap_delta_sum))
-    cd3.metric("Reserves Change", fmt_signed_mboe(consol["reserves_delta_boe"].sum()))
-    cd4.metric("OI Change", fmt_signed_mm(consol["operating_income_delta_dollars"].sum()))
+    cd2.metric("NPV10 Sacrificed", fmt_mm(consol["npv_sacrificed_dollars"].sum()))
+    cd3.metric("Cost of Reserves Improvement", fmt_dollarboe(portfolio_cor_improvement))
+    cd4.metric("BOE Lost", fmt_boe(consol["boe_lost"].sum()))
 
     # Chart
     if len(consol) > 0:
@@ -963,7 +1060,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
         ce1, ce2, ce3, ce4, ce5 = st.columns(5)
         ce1.metric("Extension Opportunities", f"{len(ext):,}")
         ce2.metric("Capital Change", fmt_signed_mm(ext["capex_delta_dollars"].sum()))
-        ce3.metric("NPV10 Change", fmt_signed_mm(ext["npv10_delta_dollars"].sum()))
+        ce3.metric("Incremental NPV10 Added", fmt_signed_mm(ext["incremental_npv10_added_dollars"].sum()))
         ce4.metric("Reserves Change", fmt_signed_mboe(ext["reserves_delta_boe"].sum()))
         valid_marginal = ext[ext["marginal_npv_to_inc_capital"].notna()]
         if len(valid_marginal) > 0:
@@ -989,7 +1086,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
         cc1, cc2, cc3, cc4 = st.columns(4)
         cc1.metric("New Locations Identified", f"{len(cre):,}")
         cc2.metric("New Inventory Capital Added", fmt_signed_mm(cre["new_capex_dollars"].sum()))
-        cc3.metric("New Inventory Value Added", fmt_signed_mm(cre["new_npv10_dollars"].sum()))
+        cc3.metric("Incremental NPV10 Added", fmt_signed_mm(cre["incremental_npv10_added_dollars"].sum()))
         cc4.metric("New Inventory Reserves Added", fmt_signed_mboe(cre["new_reserves_boe"].sum()))
 
         fig_cre = go.Figure(go.Bar(
@@ -1037,10 +1134,14 @@ def render_existing_plan_optimization(econ: pd.DataFrame, event_forecasts: pd.Da
     # Summary metrics
     mc1, mc2, mc3, mc4, mc5 = st.columns(5)
     mc1.metric("Events", f"{len(filtered):,}")
-    mc2.metric("Old Plan Capital", fmt_mm(filtered["old_capex_dollars"].sum()))
-    mc3.metric("New Plan Capital", fmt_mm(filtered["new_capex_dollars"].sum()))
-    mc4.metric("Capital Change (+ added / - saved)", fmt_signed_mm(filtered["capex_delta_dollars"].sum()))
-    mc5.metric("NPV10 Change", fmt_signed_mm(filtered["npv10_delta_dollars"].sum()))
+    mc2.metric("Capital Saved", fmt_mm(filtered["capital_saved_dollars"].sum()))
+    mc3.metric("Capital Saved per BOE Lost", fmt_dollarboe(_safe_div(
+        filtered["capital_saved_dollars"].sum(), filtered["boe_lost"].sum())))
+    filtered_old_cor = _safe_div(filtered["old_capex_dollars"].sum(), filtered["old_reserves_boe"].sum())
+    filtered_new_cor = _safe_div(filtered["new_capex_dollars"].sum(), filtered["new_reserves_boe"].sum())
+    mc4.metric("Cost of Reserves Improvement", fmt_dollarboe(
+        filtered_old_cor - filtered_new_cor if pd.notna(filtered_old_cor) and pd.notna(filtered_new_cor) else np.nan))
+    mc5.metric("Locations Eliminated", f"{int(filtered['locations_eliminated'].sum()):,}")
 
     mc6, mc7, mc8, mc9, mc10 = st.columns(5)
     mc6.metric("Old Plan NPV10", fmt_mm(filtered["old_npv10_dollars"].sum()))
@@ -1083,6 +1184,8 @@ def render_existing_plan_optimization(econ: pd.DataFrame, event_forecasts: pd.Da
         "old_npv10_dollars", "new_npv10_dollars", "npv10_delta_dollars",
         "old_reserves_boe", "new_reserves_boe", "reserves_delta_boe",
         "old_cost_of_reserves", "new_cost_of_reserves_derived",
+        "capital_saved_dollars", "boe_lost", "capital_saved_per_boe_lost",
+        "cost_of_reserves_improvement", "locations_eliminated", "npv_sacrificed_dollars",
     ]
     avail = [c for c in display_cols if c in filtered.columns]
     st.dataframe(filtered[avail].sort_values("event"), use_container_width=True, hide_index=True)
@@ -1104,7 +1207,7 @@ def render_inventory_opportunities(econ: pd.DataFrame):
             me1, me2, me3, me4 = st.columns(4)
             me1.metric("Extension Opportunities", f"{len(ext):,}")
             me2.metric("Capital Change", fmt_signed_mm(ext["capex_delta_dollars"].sum()))
-            me3.metric("NPV10 Change", fmt_signed_mm(ext["npv10_delta_dollars"].sum()))
+            me3.metric("Incremental NPV10 Added", fmt_signed_mm(ext["incremental_npv10_added_dollars"].sum()))
             me4.metric("Reserves Change", fmt_signed_mboe(ext["reserves_delta_boe"].sum()))
 
             me5, me6, me7, me8 = st.columns(4)
@@ -1143,7 +1246,7 @@ def render_inventory_opportunities(econ: pd.DataFrame):
                 "old_capex_dollars", "new_capex_dollars", "capex_delta_dollars",
                 "old_npv10_dollars", "new_npv10_dollars", "npv10_delta_dollars",
                 "old_reserves_boe", "new_reserves_boe", "reserves_delta_boe",
-                "marginal_npv_to_inc_capital",
+                "marginal_npv_to_inc_capital", "incremental_npv10_added_dollars",
             ]
             avail = [c for c in display_cols if c in ext.columns]
             st.dataframe(ext[avail].sort_values("event"), use_container_width=True, hide_index=True)
@@ -1159,7 +1262,7 @@ def render_inventory_opportunities(econ: pd.DataFrame):
             mc1, mc2, mc3, mc4 = st.columns(4)
             mc1.metric("New Locations", f"{len(cre):,}")
             mc2.metric("New Inventory Capital Added", fmt_signed_mm(cre["new_capex_dollars"].sum()))
-            mc3.metric("New Inventory Value Added", fmt_signed_mm(cre["new_npv10_dollars"].sum()))
+            mc3.metric("Incremental NPV10 Added", fmt_signed_mm(cre["incremental_npv10_added_dollars"].sum()))
             mc4.metric("New Inventory Reserves Added", fmt_signed_mboe(cre["new_reserves_boe"].sum()))
 
             mc5, mc6, mc7, mc8 = st.columns(4)
@@ -1197,6 +1300,7 @@ def render_inventory_opportunities(econ: pd.DataFrame):
                 "new_capex_dollars", "new_npv10_dollars", "new_reserves_boe",
                 "new_lifetime_revenue_dollars", "new_lifetime_operating_income_dollars",
                 "new_payout_source", "new_ror_pct", "new_npv_inv_ratio", "new_cost_of_reserves",
+                "incremental_npv10_added_dollars",
             ]
             avail = [c for c in display_cols if c in cre.columns]
             st.dataframe(cre[avail].sort_values("event"), use_container_width=True, hide_index=True)
@@ -1258,6 +1362,20 @@ def render_event_explorer(
     hc3.markdown(f"**Old Curves:** {ev['old_type_curves_used'] or 'Not applicable'}")
     hc4.markdown(f"**New Curve:** {ev['new_type_curve_used']}")
 
+    # --- Capital Efficiency ---
+    st.subheader("Capital Efficiency")
+    if ev["event_type"] == "Consolidation":
+        ec1, ec2, ec3, ec4, ec5 = st.columns(5)
+        ec1.metric("Capital Saved", fmt_mm(ev["capital_saved_dollars"]))
+        ec2.metric("Capital Saved per BOE Lost", fmt_dollarboe(ev["capital_saved_per_boe_lost"]))
+        ec3.metric("Cost of Reserves Improvement", fmt_dollarboe(ev["cost_of_reserves_improvement"]))
+        ec4.metric("Locations Eliminated", f"{int(ev['locations_eliminated']):,}")
+        ec5.metric("NPV10 Sacrificed", fmt_mm(ev["npv_sacrificed_dollars"]))
+    else:
+        ec1, ec2 = st.columns(2)
+        ec1.metric("Incremental NPV10 Added", fmt_signed_mm(ev["incremental_npv10_added_dollars"]))
+        ec2.metric("Event Type", ev["event_type"])
+
     # --- Financial Bridge ---
     st.subheader("Financial Bridge")
 
@@ -1276,6 +1394,11 @@ def render_event_explorer(
         ("NPV / Investment", fmt_ratio(ev["old_npv_inv_ratio_derived"]), fmt_ratio(ev["new_npv_inv_ratio"]), "—"),
         ("OI Margin $/boe", fmt_dollarboe(ev["old_lifetime_oi_per_boe"]), fmt_dollarboe(ev["new_lifetime_oi_per_boe"]), "—"),
         ("NPV10 per BOE", fmt_dollarboe(ev["old_npv10_per_boe"]), fmt_dollarboe(ev["new_npv10_per_boe"]), "—"),
+        ("Capital Saved", "—", "—", fmt_mm(ev["capital_saved_dollars"]) if ev["event_type"] == "Consolidation" else "N/A"),
+        ("Capital Saved per BOE Lost", "—", "—", fmt_dollarboe(ev["capital_saved_per_boe_lost"]) if ev["event_type"] == "Consolidation" else "N/A"),
+        ("Cost of Reserves Improvement", "—", "—", fmt_dollarboe(ev["cost_of_reserves_improvement"]) if ev["event_type"] == "Consolidation" else "N/A"),
+        ("Locations Eliminated", "—", "—", f"{int(ev['locations_eliminated']):,}" if ev["event_type"] == "Consolidation" else "N/A"),
+        ("Incremental NPV10 Added", "—", "—", fmt_signed_mm(ev["incremental_npv10_added_dollars"]) if ev["event_type"] != "Consolidation" else "N/A"),
     ]
 
     if ev["event_type"] == "Creation":
@@ -1473,7 +1596,7 @@ def render_downloads(
 
 def main():
     st.set_page_config(
-        page_title="Viewfield Bakken Exploitation ",
+        page_title="Viewfield Bakken Capital Efficiency",
         page_icon="📈",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -1520,7 +1643,7 @@ def main():
     page = st.sidebar.radio(
         "Navigate",
         [
-            "Executive Summary",
+            "Capital Efficiency",
             "Existing Plan Optimization",
             "Inventory Opportunities",
             "Event Explorer",
@@ -1528,7 +1651,7 @@ def main():
         ],
     )
 
-    if page == "Executive Summary":
+    if page == "Capital Efficiency":
         render_executive_summary(econ, exec_summary, event_forecasts)
     elif page == "Existing Plan Optimization":
         render_existing_plan_optimization(econ, event_forecasts)
