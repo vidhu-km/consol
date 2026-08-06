@@ -881,7 +881,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     cd4.metric("OI Change", fmt_mm(consol["operating_income_delta_dollars"].sum()))
 
     # Charts
-    col_l = st.columns(1)
+    col_l, col_r = st.columns(2)
     with col_l:
         if len(consol) > 0:
             df_ranked = consol.sort_values("npv10_delta_dollars", ascending=False).copy()
