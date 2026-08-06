@@ -889,84 +889,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
         "Positive values are added; negative values are removed or saved."
     )
 
-    # --- Section B: Existing Plan Optimization ---
-    st.subheader("Existing Plan Optimization (Consolidations)")
-    cb1, cb2, cb3, cb4 = st.columns(4)
-    cb1.metric("Consolidation Events", f"{len(consol):,}")
-    cb2.metric("One-Mile Locations Replaced", f"{2 * len(consol):,}")
-    cb3.metric("Two-Mile Locations", f"{len(consol):,}")
-    cb4.metric("Net Location Reduction", f"{len(consol):,}")
-
-    cd1, cd2, cd3, cd4 = st.columns(4)
-    cd1.metric("NPV10 Change", fmt_signed_mm(consol["npv10_delta_dollars"].sum()))
-    cap_delta_sum = consol["capex_delta_dollars"].sum()
-    cd2.metric("Capital Change (+ added / - saved)", fmt_signed_mm(cap_delta_sum))
-    cd3.metric("Reserves Change", fmt_signed_mboe(consol["reserves_delta_boe"].sum()))
-    cd4.metric("OI Change", fmt_signed_mm(consol["operating_income_delta_dollars"].sum()))
-
-    # Chart
-    if len(consol) > 0:
-        df_ranked = consol.sort_values("npv10_delta_dollars", ascending=False).copy()
-        df_ranked["event_label"] = df_ranked["event"].astype(str)
-        df_ranked["color"] = df_ranked["npv10_delta_dollars"].apply(
-            lambda x: COLOR_POSITIVE if x >= 0 else COLOR_NEGATIVE
-        )
-        fig = go.Figure(go.Bar(
-            x=df_ranked["event_label"],
-            y=df_ranked["npv10_delta_dollars"] / 1e6,
-            marker_color=df_ranked["color"],
-            hovertemplate="Event %{x}<br>NPV10 Change: %{y:+.2f} MM<extra></extra>",
-        ))
-        _base_layout(fig, "Consolidation NPV10 Change by Event", "Event #", "NPV10 Change ($MM)")
-        fig.add_hline(y=0, line_dash="dash", line_color="gray")
-        st.plotly_chart(fig, use_container_width=True)
-
-    # --- Section C: Inventory Enhancements ---
-    st.subheader("Inventory Enhancements Identified (Extensions)")
-    if len(ext) > 0:
-        ce1, ce2, ce3, ce4, ce5 = st.columns(5)
-        ce1.metric("Extension Opportunities", f"{len(ext):,}")
-        ce2.metric("Capital Change", fmt_signed_mm(ext["capex_delta_dollars"].sum()))
-        ce3.metric("NPV10 Change", fmt_signed_mm(ext["npv10_delta_dollars"].sum()))
-        ce4.metric("Reserves Change", fmt_signed_mboe(ext["reserves_delta_boe"].sum()))
-        valid_marginal = ext[ext["marginal_npv_to_inc_capital"].notna()]
-        if len(valid_marginal) > 0:
-            weighted = ext["npv10_delta_dollars"].sum() / ext["capex_delta_dollars"].sum() if ext["capex_delta_dollars"].sum() != 0 else np.nan
-            ce5.metric("Portfolio Marginal NPV/Cap", fmt_ratio(weighted))
-        else:
-            ce5.metric("Portfolio Marginal NPV/Cap", "N/M")
-
-        fig_ext = go.Figure(go.Bar(
-            x=ext.sort_values("npv10_delta_dollars", ascending=False)["event"].astype(str),
-            y=ext.sort_values("npv10_delta_dollars", ascending=False)["npv10_delta_dollars"] / 1e6,
-            marker_color=COLOR_EXTENSION,
-        ))
-        _base_layout(fig_ext, "Incremental NPV10 by Extension Event", "Event #", "Incremental NPV10 ($MM)")
-        fig_ext.add_hline(y=0, line_dash="dash", line_color="gray")
-        st.plotly_chart(fig_ext, use_container_width=True)
-    else:
-        st.info("No extension events.")
-
-    # --- Section D: New Inventory ---
-    st.subheader("New Inventory Identified (Creations)")
-    if len(cre) > 0:
-        cc1, cc2, cc3, cc4 = st.columns(4)
-        cc1.metric("New Locations Identified", f"{len(cre):,}")
-        cc2.metric("New Inventory Capital Added", fmt_signed_mm(cre["new_capex_dollars"].sum()))
-        cc3.metric("New Inventory Value Added", fmt_signed_mm(cre["new_npv10_dollars"].sum()))
-        cc4.metric("New Inventory Reserves Added", fmt_signed_mboe(cre["new_reserves_boe"].sum()))
-
-        fig_cre = go.Figure(go.Bar(
-            x=cre.sort_values("new_npv10_dollars", ascending=False)["event"].astype(str),
-            y=cre.sort_values("new_npv10_dollars", ascending=False)["new_npv10_dollars"] / 1e6,
-            marker_color=COLOR_CREATION,
-        ))
-        _base_layout(fig_cre, "New Inventory NPV10 by Event", "Event #", "NPV10 ($MM)")
-        st.plotly_chart(fig_cre, use_container_width=True)
-    else:
-        st.info("No creation events.")
-
-    # --- Section E: Review Value Mix ---
+    # --- Section B: Review Value Mix ---
     st.subheader("Review Value Mix")
     value_mix = pd.DataFrame({
         "Category": [
@@ -1001,6 +924,85 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
             st.caption("Negative category values are excluded from pie-slice sizing and remain visible in the signed summary metrics above.")
     else:
         st.info("No positive review value is available for the pie chart.")
+
+    # --- Section C: Existing Plan Optimization ---
+    st.subheader("Existing Plan Optimization (Consolidations)")
+    cb1, cb2, cb3, cb4 = st.columns(4)
+    cb1.metric("Consolidation Events", f"{len(consol):,}")
+    cb2.metric("One-Mile Locations Replaced", f"{2 * len(consol):,}")
+    cb3.metric("Two-Mile Locations", f"{len(consol):,}")
+    cb4.metric("Net Location Reduction", f"{len(consol):,}")
+
+    cd1, cd2, cd3, cd4 = st.columns(4)
+    cd1.metric("NPV10 Change", fmt_signed_mm(consol["npv10_delta_dollars"].sum()))
+    cap_delta_sum = consol["capex_delta_dollars"].sum()
+    cd2.metric("Capital Change (+ added / - saved)", fmt_signed_mm(cap_delta_sum))
+    cd3.metric("Reserves Change", fmt_signed_mboe(consol["reserves_delta_boe"].sum()))
+    cd4.metric("OI Change", fmt_signed_mm(consol["operating_income_delta_dollars"].sum()))
+
+    # Chart
+    if len(consol) > 0:
+        df_ranked = consol.sort_values("npv10_delta_dollars", ascending=False).copy()
+        df_ranked["event_label"] = df_ranked["event"].astype(str)
+        df_ranked["color"] = df_ranked["npv10_delta_dollars"].apply(
+            lambda x: COLOR_POSITIVE if x >= 0 else COLOR_NEGATIVE
+        )
+        fig = go.Figure(go.Bar(
+            x=df_ranked["event_label"],
+            y=df_ranked["npv10_delta_dollars"] / 1e6,
+            marker_color=df_ranked["color"],
+            hovertemplate="Event %{x}<br>NPV10 Change: %{y:+.2f} MM<extra></extra>",
+        ))
+        _base_layout(fig, "Consolidation NPV10 Change by Event", "Event #", "NPV10 Change ($MM)")
+        fig.add_hline(y=0, line_dash="dash", line_color="gray")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # --- Section D: Inventory Enhancements ---
+    st.subheader("Inventory Enhancements Identified (Extensions)")
+    if len(ext) > 0:
+        ce1, ce2, ce3, ce4, ce5 = st.columns(5)
+        ce1.metric("Extension Opportunities", f"{len(ext):,}")
+        ce2.metric("Capital Change", fmt_signed_mm(ext["capex_delta_dollars"].sum()))
+        ce3.metric("NPV10 Change", fmt_signed_mm(ext["npv10_delta_dollars"].sum()))
+        ce4.metric("Reserves Change", fmt_signed_mboe(ext["reserves_delta_boe"].sum()))
+        valid_marginal = ext[ext["marginal_npv_to_inc_capital"].notna()]
+        if len(valid_marginal) > 0:
+            weighted = ext["npv10_delta_dollars"].sum() / ext["capex_delta_dollars"].sum() if ext["capex_delta_dollars"].sum() != 0 else np.nan
+            ce5.metric("Portfolio Marginal NPV/Cap", fmt_ratio(weighted))
+        else:
+            ce5.metric("Portfolio Marginal NPV/Cap", "N/M")
+
+        fig_ext = go.Figure(go.Bar(
+            x=ext.sort_values("npv10_delta_dollars", ascending=False)["event"].astype(str),
+            y=ext.sort_values("npv10_delta_dollars", ascending=False)["npv10_delta_dollars"] / 1e6,
+            marker_color=COLOR_EXTENSION,
+        ))
+        _base_layout(fig_ext, "Incremental NPV10 by Extension Event", "Event #", "Incremental NPV10 ($MM)")
+        fig_ext.add_hline(y=0, line_dash="dash", line_color="gray")
+        st.plotly_chart(fig_ext, use_container_width=True)
+    else:
+        st.info("No extension events.")
+
+    # --- Section E: New Inventory ---
+    st.subheader("New Inventory Identified (Creations)")
+    if len(cre) > 0:
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        cc1.metric("New Locations Identified", f"{len(cre):,}")
+        cc2.metric("New Inventory Capital Added", fmt_signed_mm(cre["new_capex_dollars"].sum()))
+        cc3.metric("New Inventory Value Added", fmt_signed_mm(cre["new_npv10_dollars"].sum()))
+        cc4.metric("New Inventory Reserves Added", fmt_signed_mboe(cre["new_reserves_boe"].sum()))
+
+        fig_cre = go.Figure(go.Bar(
+            x=cre.sort_values("new_npv10_dollars", ascending=False)["event"].astype(str),
+            y=cre.sort_values("new_npv10_dollars", ascending=False)["new_npv10_dollars"] / 1e6,
+            marker_color=COLOR_CREATION,
+        ))
+        _base_layout(fig_cre, "New Inventory NPV10 by Event", "Event #", "NPV10 ($MM)")
+        st.plotly_chart(fig_cre, use_container_width=True)
+    else:
+        st.info("No creation events.")
+
+    
 
 
 
