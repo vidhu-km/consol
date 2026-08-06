@@ -940,26 +940,6 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
         "Incremental NPV10 Added combines extension NPV10 deltas and creation NPV10."
     )
 
-    if len(consol) > 0:
-        ce_chart = consol.copy()
-        ce_chart["event_label"] = ce_chart["event"].astype(str)
-        fig_ce = px.scatter(
-            ce_chart,
-            x=ce_chart["npv_sacrificed_dollars"] / 1e6,
-            y=ce_chart["capital_saved_dollars"] / 1e6,
-            size=ce_chart["locations_eliminated"].clip(lower=1),
-            hover_name="event_label",
-            hover_data={
-                "capital_saved_per_boe_lost": ":.2f",
-                "cost_of_reserves_improvement": ":.2f",
-                "boe_lost": ":,.0f",
-            },
-            labels={"x": "NPV10 Sacrificed ($MM)", "y": "Capital Saved ($MM)"},
-        )
-        _base_layout(fig_ce, "Capital Saved versus NPV10 Sacrificed",
-                     "NPV10 Sacrificed ($MM)", "Capital Saved ($MM)")
-        st.plotly_chart(fig_ce, use_container_width=True)
-
     total_val = (
         consol["npv10_delta_dollars"].sum()
         + ext["npv10_delta_dollars"].sum()
