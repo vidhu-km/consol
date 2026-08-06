@@ -436,9 +436,9 @@ def build_executive_summary(econ: pd.DataFrame) -> pd.DataFrame:
     consol = econ[econ['event_type'] == 'Consolidation']
     ext = econ[econ['event_type'] == 'Extension']
     cre = econ[econ['event_type'] == 'Creation']
-    rows.append({'category': 'Consolidation', 'event_story': EVENT_TYPE_MAP['Consolidation'], 'count': len(consol), 'total_capital_saved_dollars': consol['capital_saved_dollars'].sum(), 'average_cost_of_reserves_improvement': consol['cost_of_reserves_improvement'].mean(), 'total_npv10_to_total_capex': total_npv_to_capex(consol), 'incremental_npv10_dollars': np.nan, 'incremental_npv10_pct': np.nan, 'total_npv10_added_dollars': np.nan})
-    rows.append({'category': 'Extension', 'event_story': EVENT_TYPE_MAP['Extension'], 'count': len(ext), 'total_capital_saved_dollars': np.nan, 'average_cost_of_reserves_improvement': np.nan, 'total_npv10_to_total_capex': np.nan, 'incremental_npv10_dollars': ext['npv10_delta_dollars'].sum(), 'incremental_npv10_pct': extension_npv_uplift_pct(ext), 'total_npv10_added_dollars': np.nan})
-    rows.append({'category': 'Creation', 'event_story': EVENT_TYPE_MAP['Creation'], 'count': len(cre), 'total_capital_saved_dollars': np.nan, 'average_cost_of_reserves_improvement': np.nan, 'total_npv10_to_total_capex': np.nan, 'incremental_npv10_dollars': np.nan, 'incremental_npv10_pct': np.nan, 'total_npv10_added_dollars': cre['new_npv10_dollars'].sum()})
+    rows.append({'category': 'Consolidation', 'event_story': EVENT_TYPE_MAP['Consolidation'], 'count': len(consol), 'total_capital_saved_dollars': consol['capital_saved_dollars'].sum(), 'average_cost_of_reserves_improvement': consol['cost_of_reserves_improvement'].mean(), 'incremental_npv10_dollars': np.nan, 'incremental_npv10_pct': np.nan, 'total_npv10_added_dollars': np.nan})
+    rows.append({'category': 'Extension', 'event_story': EVENT_TYPE_MAP['Extension'], 'count': len(ext), 'total_capital_saved_dollars': np.nan, 'average_cost_of_reserves_improvement': np.nan, 'incremental_npv10_dollars': ext['npv10_delta_dollars'].sum(), 'incremental_npv10_pct': extension_npv_uplift_pct(ext), 'total_npv10_added_dollars': np.nan})
+    rows.append({'category': 'Creation', 'event_story': EVENT_TYPE_MAP['Creation'], 'count': len(cre), 'total_capital_saved_dollars': np.nan, 'average_cost_of_reserves_improvement': np.nan, 'incremental_npv10_dollars': np.nan, 'incremental_npv10_pct': np.nan, 'total_npv10_added_dollars': cre['new_npv10_dollars'].sum()})
     return pd.DataFrame(rows)
 
 def fmt_mm(val: float | None, prefix: str='$', suffix: str=' MM') -> str:
@@ -478,11 +478,6 @@ def extension_npv_uplift_pct(df: pd.DataFrame) -> float:
     if df.empty:
         return np.nan
     return 100.0 * _safe_div(df['npv10_delta_dollars'].sum(), df['capex_delta_dollars'].sum())
-
-def total_npv_to_capex(df: pd.DataFrame) -> float:
-    if df.empty:
-        return np.nan
-    return _safe_div(df['new_npv10_dollars'].sum(), df['new_capex_dollars'].sum())
 
 def fmt_ratio(val: float | None) -> str:
     if val is None or np.isnan(val):
