@@ -898,37 +898,6 @@ def render_extension(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
 
     # Incremental efficiency scatter
     st.markdown("#### Capital Efficiency: Incremental Capex vs. Incremental NPV10")
-
-    eff_df = df[[
-    "event",
-    COL_NEW_CURVE,
-    "incremental_capex_dollars",
-    "incremental_npv10_dollars",
-    "incremental_reserves_boe",
-    ]].copy()
-
-eff_df.rename(columns={
-    "incremental_capex_dollars": "Inc. Capex ($MM)",
-    "incremental_npv10_dollars": "Inc. NPV10 ($MM)",
-    "incremental_reserves_boe": "Inc. Reserves (Mboe)",
-}, inplace=True)
-
-# Convert units
-eff_df["Inc. Capex ($MM)"] /= 1e6
-eff_df["Inc. NPV10 ($MM)"] /= 1e6
-eff_df["Inc. Reserves (Mboe)"] /= 1000
-
-eff_df["Bubble Size"] = eff_df["Inc. Reserves (Mboe)"].abs()
-
-fig2 = px.scatter(
-    eff_df,
-    x="Inc. Capex ($MM)",
-    y="Inc. NPV10 ($MM)",
-    size="Bubble Size",
-    hover_data=["event", COL_NEW_CURVE, "Inc. Reserves (Mboe)"],
-    color_discrete_sequence=[PAL_EXTENSION],
-    size_max=28,
-)
     eff_df["Bubble Size"] = eff_df["Inc. Reserves (Mboe)"].abs()
     fig2 = px.scatter(
     eff_df,
