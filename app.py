@@ -809,7 +809,6 @@ def extension_npv_uplift_pct(df: pd.DataFrame) -> float:
 
 
 def total_npv_to_capex(df: pd.DataFrame) -> float:
-    """Total new-plan NPV10 divided by total new-plan capital."""
     if df.empty:
         return np.nan
     return _safe_div(
