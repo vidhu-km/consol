@@ -311,7 +311,7 @@ def validate_workbook_schema(
     report = pd.DataFrame(rows)
 
     if blocking:
-        st.error("❌ Blocking validation errors found. See Data Quality page for details.")
+        st.error("❌ Blocking validation errors found. See the validation details below.")
         for r in rows:
             if r["severity"] == "BLOCKING" and r["status"] == "FAIL":
                 st.error(f"**{r['check']}**: {r['details']}")
@@ -733,10 +733,31 @@ def fmt_mm(val: float | None, prefix: str = "$", suffix: str = " MM") -> str:
     return f"{prefix}{mm:,.1f}{suffix}"
 
 
+def fmt_signed_mm(val: float | None, suffix: str = " MM") -> str:
+    """Format a change in actual dollars with an explicit + / - sign."""
+    if val is None or np.isnan(val):
+        return "N/A"
+    return f"{val / 1_000_000:+,.1f}{suffix}".replace("+", "+$", 1).replace("-", "-$", 1)
+
+
 def fmt_mboe(val: float | None) -> str:
     if val is None or np.isnan(val):
         return "N/A"
     return f"{val / 1_000:,.1f} Mboe"
+
+
+def fmt_signed_mboe(val: float | None) -> str:
+    """Format a reserves change with an explicit + / - sign."""
+    if val is None or np.isnan(val):
+        return "N/A"
+    return f"{val / 1_000:+,.1f} Mboe"
+
+
+def fmt_signed_dollarboe(val: float | None) -> str:
+    """Format a $/boe change with an explicit + / - sign."""
+    if val is None or np.isnan(val):
+        return "N/A"
+    return f"{val:+,.2f} $/boe"
 
 
 def fmt_pct(val: float | None) -> str:
@@ -860,9 +881,13 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     c2.metric("Existing Plan Optimizations", f"{len(consol):,}")
     c3.metric("Inventory Enhancements", f"{len(ext):,}")
     c4.metric("New Inventory Locations", f"{len(cre):,}")
-    c5.metric("Total Review Value", fmt_mm(total_val))
-    c6.metric("Total Review Capital", fmt_mm(total_cap))
-    st.caption("Total Review Value = Consolidation NPV uplift + Extension incremental NPV uplift + Creation gross NPV.")
+    c5.metric("Review Value Change (+ added / - removed)", fmt_signed_mm(total_val))
+    c6.metric("Review Capital Change (+ added / - saved)", fmt_signed_mm(total_cap))
+    st.caption(
+        "Review Value = consolidation NPV10 change + extension incremental NPV10 + creation NPV10. "
+        "Review Capital = consolidation capital change + extension incremental capital + creation capital. "
+        "Positive values are added; negative values are removed or saved."
+    )
 
     # --- Section B: Existing Plan Optimization ---
     st.subheader("Existing Plan Optimization (Consolidations)")
@@ -873,52 +898,37 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     cb4.metric("Net Location Reduction", f"{len(consol):,}")
 
     cd1, cd2, cd3, cd4 = st.columns(4)
-    cd1.metric("NPV10 Uplift", fmt_mm(consol["npv10_delta_dollars"].sum()))
+    cd1.metric("NPV10 Change", fmt_signed_mm(consol["npv10_delta_dollars"].sum()))
     cap_delta_sum = consol["capex_delta_dollars"].sum()
-    cap_label = "Capital Reduction" if cap_delta_sum < 0 else "Incremental Capital"
-    cd2.metric(cap_label, fmt_mm(cap_delta_sum))
-    cd3.metric("Reserves Change", fmt_mboe(consol["reserves_delta_boe"].sum()))
-    cd4.metric("OI Change", fmt_mm(consol["operating_income_delta_dollars"].sum()))
+    cd2.metric("Capital Change (+ added / - saved)", fmt_signed_mm(cap_delta_sum))
+    cd3.metric("Reserves Change", fmt_signed_mboe(consol["reserves_delta_boe"].sum()))
+    cd4.metric("OI Change", fmt_signed_mm(consol["operating_income_delta_dollars"].sum()))
 
-    # Charts
-    col_l, col_r = st.columns(2)
-    with col_l:
-        if len(consol) > 0:
-            df_ranked = consol.sort_values("npv10_delta_dollars", ascending=False).copy()
-            df_ranked["event_label"] = df_ranked["event"].astype(str)
-            df_ranked["color"] = df_ranked["npv10_delta_dollars"].apply(lambda x: COLOR_POSITIVE if x >= 0 else COLOR_NEGATIVE)
-            fig = go.Figure(go.Bar(
-                x=df_ranked["event_label"],
-                y=df_ranked["npv10_delta_dollars"] / 1e6,
-                marker_color=df_ranked["color"],
-                hovertemplate="Event %{x}<br>NPV Uplift: $%{y:.2f} MM<extra></extra>"
-            ))
-            _base_layout(fig, "Consolidation NPV10 Uplift by Event", "Event #", "NPV10 Uplift ($MM)")
-            fig.add_hline(y=0, line_dash="dash", line_color="gray")
-            st.plotly_chart(fig, use_container_width=True)
-
-    with col_r:
-        if len(consol) > 0:
-            fig2 = px.scatter(
-                consol, x=consol["capex_delta_dollars"] / 1e6,
-                y=consol["npv10_delta_dollars"] / 1e6,
-                size=consol["new_reserves_boe"].clip(lower=1),
-                hover_data={"event": True},
-                labels={"x": "Capital Delta ($MM)", "y": "NPV10 Delta ($MM)"},
-            )
-            _base_layout(fig2, "Capital vs NPV Delta (Consolidations)", "Capital Delta ($MM)", "NPV10 Delta ($MM)")
-            fig2.add_hline(y=0, line_dash="dash", line_color="gray")
-            fig2.add_vline(x=0, line_dash="dash", line_color="gray")
-            st.plotly_chart(fig2, use_container_width=True)
+    # Chart
+    if len(consol) > 0:
+        df_ranked = consol.sort_values("npv10_delta_dollars", ascending=False).copy()
+        df_ranked["event_label"] = df_ranked["event"].astype(str)
+        df_ranked["color"] = df_ranked["npv10_delta_dollars"].apply(
+            lambda x: COLOR_POSITIVE if x >= 0 else COLOR_NEGATIVE
+        )
+        fig = go.Figure(go.Bar(
+            x=df_ranked["event_label"],
+            y=df_ranked["npv10_delta_dollars"] / 1e6,
+            marker_color=df_ranked["color"],
+            hovertemplate="Event %{x}<br>NPV10 Change: %{y:+.2f} MM<extra></extra>",
+        ))
+        _base_layout(fig, "Consolidation NPV10 Change by Event", "Event #", "NPV10 Change ($MM)")
+        fig.add_hline(y=0, line_dash="dash", line_color="gray")
+        st.plotly_chart(fig, use_container_width=True)
 
     # --- Section C: Inventory Enhancements ---
     st.subheader("Inventory Enhancements Identified (Extensions)")
     if len(ext) > 0:
         ce1, ce2, ce3, ce4, ce5 = st.columns(5)
         ce1.metric("Extension Opportunities", f"{len(ext):,}")
-        ce2.metric("Incremental Capital", fmt_mm(ext["capex_delta_dollars"].sum()))
-        ce3.metric("Incremental NPV10", fmt_mm(ext["npv10_delta_dollars"].sum()))
-        ce4.metric("Incremental Reserves", fmt_mboe(ext["reserves_delta_boe"].sum()))
+        ce2.metric("Capital Change", fmt_signed_mm(ext["capex_delta_dollars"].sum()))
+        ce3.metric("NPV10 Change", fmt_signed_mm(ext["npv10_delta_dollars"].sum()))
+        ce4.metric("Reserves Change", fmt_signed_mboe(ext["reserves_delta_boe"].sum()))
         valid_marginal = ext[ext["marginal_npv_to_inc_capital"].notna()]
         if len(valid_marginal) > 0:
             weighted = ext["npv10_delta_dollars"].sum() / ext["capex_delta_dollars"].sum() if ext["capex_delta_dollars"].sum() != 0 else np.nan
@@ -942,9 +952,9 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     if len(cre) > 0:
         cc1, cc2, cc3, cc4 = st.columns(4)
         cc1.metric("New Locations Identified", f"{len(cre):,}")
-        cc2.metric("New Inventory Capital", fmt_mm(cre["new_capex_dollars"].sum()))
-        cc3.metric("New Inventory NPV10", fmt_mm(cre["new_npv10_dollars"].sum()))
-        cc4.metric("New Inventory Reserves", fmt_mboe(cre["new_reserves_boe"].sum()))
+        cc2.metric("New Inventory Capital Added", fmt_signed_mm(cre["new_capex_dollars"].sum()))
+        cc3.metric("New Inventory Value Added", fmt_signed_mm(cre["new_npv10_dollars"].sum()))
+        cc4.metric("New Inventory Reserves Added", fmt_signed_mboe(cre["new_reserves_boe"].sum()))
 
         fig_cre = go.Figure(go.Bar(
             x=cre.sort_values("new_npv10_dollars", ascending=False)["event"].astype(str),
@@ -956,29 +966,42 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     else:
         st.info("No creation events.")
 
-    # --- Section E: Value Bridge ---
-    st.subheader("Review Value Bridge")
-    bridge_labels = ["Existing Plan\nOptimization", "Inventory\nEnhancement", "New\nInventory", "Total Review\nValue"]
-    bridge_values = [
-        consol["npv10_delta_dollars"].sum() / 1e6,
-        ext["npv10_delta_dollars"].sum() / 1e6,
-        cre["new_npv10_dollars"].sum() / 1e6,
-    ]
-    bridge_values.append(sum(bridge_values))
+    # --- Section E: Review Value Mix ---
+    st.subheader("Review Value Mix")
+    value_mix = pd.DataFrame({
+        "Category": [
+            "Existing Plan Optimization",
+            "Inventory Enhancement",
+            "New Inventory",
+        ],
+        "Value": [
+            consol["npv10_delta_dollars"].sum(),
+            ext["npv10_delta_dollars"].sum(),
+            cre["new_npv10_dollars"].sum(),
+        ],
+    })
+    pie_values = value_mix["Value"].clip(lower=0)
+    if pie_values.sum() > 0:
+        fig_mix = go.Figure(go.Pie(
+            labels=value_mix["Category"],
+            values=pie_values,
+            customdata=value_mix["Value"] / 1e6,
+            texttemplate="%{label}<br>%{percent}<br>$%{customdata:.1f} MM",
+            hovertemplate="%{label}<br>Review value: $%{customdata:.2f} MM<extra></extra>",
+            hole=0.35,
+        ))
+        fig_mix.update_layout(
+            title="Share of Positive Review Value",
+            template="plotly_white",
+            margin=dict(l=30, r=30, t=60, b=30),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.15),
+        )
+        st.plotly_chart(fig_mix, use_container_width=True)
+        if (value_mix["Value"] < 0).any():
+            st.caption("Negative category values are excluded from pie-slice sizing and remain visible in the signed summary metrics above.")
+    else:
+        st.info("No positive review value is available for the pie chart.")
 
-    fig_bridge = go.Figure(go.Waterfall(
-        x=bridge_labels,
-        y=bridge_values,
-        measure=["relative", "relative", "relative", "total"],
-        text=[f"${v:,.1f} MM" for v in bridge_values],
-        textposition="outside",
-        connector=dict(line=dict(color="gray", width=1)),
-        increasing=dict(marker=dict(color=COLOR_POSITIVE)),
-        decreasing=dict(marker=dict(color=COLOR_NEGATIVE)),
-        totals=dict(marker=dict(color=COLOR_NEW)),
-    ))
-    _base_layout(fig_bridge, "Total Review Value Bridge", "", "NPV10 ($MM)")
-    st.plotly_chart(fig_bridge, use_container_width=True)
 
 
 def render_existing_plan_optimization(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
@@ -1014,15 +1037,15 @@ def render_existing_plan_optimization(econ: pd.DataFrame, event_forecasts: pd.Da
     mc1.metric("Events", f"{len(filtered):,}")
     mc2.metric("Old Plan Capital", fmt_mm(filtered["old_capex_dollars"].sum()))
     mc3.metric("New Plan Capital", fmt_mm(filtered["new_capex_dollars"].sum()))
-    mc4.metric("Capital Delta", fmt_mm(filtered["capex_delta_dollars"].sum()))
-    mc5.metric("NPV10 Uplift", fmt_mm(filtered["npv10_delta_dollars"].sum()))
+    mc4.metric("Capital Change (+ added / - saved)", fmt_signed_mm(filtered["capex_delta_dollars"].sum()))
+    mc5.metric("NPV10 Change", fmt_signed_mm(filtered["npv10_delta_dollars"].sum()))
 
     mc6, mc7, mc8, mc9, mc10 = st.columns(5)
     mc6.metric("Old Plan NPV10", fmt_mm(filtered["old_npv10_dollars"].sum()))
     mc7.metric("New Plan NPV10", fmt_mm(filtered["new_npv10_dollars"].sum()))
     mc8.metric("Old Reserves", fmt_mboe(filtered["old_reserves_boe"].sum()))
     mc9.metric("New Reserves", fmt_mboe(filtered["new_reserves_boe"].sum()))
-    mc10.metric("Reserves Delta", fmt_mboe(filtered["reserves_delta_boe"].sum()))
+    mc10.metric("Reserves Change", fmt_signed_mboe(filtered["reserves_delta_boe"].sum()))
 
     # Charts
     col_l, col_r = st.columns(2)
@@ -1049,28 +1072,6 @@ def render_existing_plan_optimization(econ: pd.DataFrame, event_forecasts: pd.Da
         fig2.add_hline(y=0, line_dash="dash", line_color="gray")
         st.plotly_chart(fig2, use_container_width=True)
 
-    col_l2, col_r2 = st.columns(2)
-    with col_l2:
-        fig3 = go.Figure()
-        fig3.add_trace(go.Bar(name="Old Plan", x=filtered["event"].astype(str),
-                              y=filtered["old_cost_of_reserves"], marker_color=COLOR_OLD))
-        fig3.add_trace(go.Bar(name="New Plan", x=filtered["event"].astype(str),
-                              y=filtered["new_cost_of_reserves_derived"], marker_color=COLOR_NEW))
-        fig3.update_layout(barmode="group")
-        _base_layout(fig3, "Cost of Reserves: Old vs New", "Event #", "Cost of Reserves ($/boe)")
-        st.plotly_chart(fig3, use_container_width=True)
-
-    with col_r2:
-        # Cumulative contribution curve
-        ranked = filtered.sort_values("npv10_delta_dollars", ascending=False).copy()
-        ranked["cumulative_uplift"] = ranked["npv10_delta_dollars"].cumsum() / 1e6
-        ranked["event_rank"] = range(1, len(ranked) + 1)
-        fig4 = go.Figure(go.Scatter(
-            x=ranked["event_rank"], y=ranked["cumulative_uplift"],
-            mode="lines+markers", marker=dict(color=COLOR_NEW),
-        ))
-        _base_layout(fig4, "Cumulative NPV10 Uplift Contribution", "Event Rank", "Cumulative Uplift ($MM)")
-        st.plotly_chart(fig4, use_container_width=True)
 
     # Event table
     st.subheader("Event Detail Table")
@@ -1100,12 +1101,12 @@ def render_inventory_opportunities(econ: pd.DataFrame):
         else:
             me1, me2, me3, me4 = st.columns(4)
             me1.metric("Extension Opportunities", f"{len(ext):,}")
-            me2.metric("Incremental Capital", fmt_mm(ext["capex_delta_dollars"].sum()))
-            me3.metric("Incremental NPV10", fmt_mm(ext["npv10_delta_dollars"].sum()))
-            me4.metric("Incremental Reserves", fmt_mboe(ext["reserves_delta_boe"].sum()))
+            me2.metric("Capital Change", fmt_signed_mm(ext["capex_delta_dollars"].sum()))
+            me3.metric("NPV10 Change", fmt_signed_mm(ext["npv10_delta_dollars"].sum()))
+            me4.metric("Reserves Change", fmt_signed_mboe(ext["reserves_delta_boe"].sum()))
 
             me5, me6, me7, me8 = st.columns(4)
-            me5.metric("Incremental OI", fmt_mm(ext["operating_income_delta_dollars"].sum()))
+            me5.metric("OI Change", fmt_signed_mm(ext["operating_income_delta_dollars"].sum()))
             total_inc_cap = ext["capex_delta_dollars"].sum()
             total_inc_npv = ext["npv10_delta_dollars"].sum()
             me6.metric("Portfolio Marginal NPV/Cap", fmt_ratio(_safe_div(total_inc_npv, total_inc_cap)))
@@ -1155,9 +1156,9 @@ def render_inventory_opportunities(econ: pd.DataFrame):
         else:
             mc1, mc2, mc3, mc4 = st.columns(4)
             mc1.metric("New Locations", f"{len(cre):,}")
-            mc2.metric("New Inventory Capital", fmt_mm(cre["new_capex_dollars"].sum()))
-            mc3.metric("New Inventory NPV10", fmt_mm(cre["new_npv10_dollars"].sum()))
-            mc4.metric("New Inventory Reserves", fmt_mboe(cre["new_reserves_boe"].sum()))
+            mc2.metric("New Inventory Capital Added", fmt_signed_mm(cre["new_capex_dollars"].sum()))
+            mc3.metric("New Inventory Value Added", fmt_signed_mm(cre["new_npv10_dollars"].sum()))
+            mc4.metric("New Inventory Reserves Added", fmt_signed_mboe(cre["new_reserves_boe"].sum()))
 
             mc5, mc6, mc7, mc8 = st.columns(4)
             avg_npv_inv = _safe_div(cre["new_npv10_dollars"].sum(), cre["new_capex_dollars"].sum())
@@ -1199,103 +1200,6 @@ def render_inventory_opportunities(econ: pd.DataFrame):
             st.dataframe(cre[avail].sort_values("event"), use_container_width=True, hide_index=True)
 
 
-def render_economic_indicators(econ: pd.DataFrame, indicators_clean: pd.DataFrame):
-    st.header("Economic Indicators")
-
-    # Filters
-    with st.expander("Filters", expanded=False):
-        fc1, fc2 = st.columns(2)
-        event_types = fc1.multiselect("Event Type", ["Consolidation", "Extension", "Creation"],
-                                      default=["Consolidation", "Extension", "Creation"], key="ei_et")
-        all_events = sorted(econ[econ["event_type"].isin(event_types)]["event"].unique())
-        sel_events = fc2.multiselect("Events", all_events, default=all_events, key="ei_ev")
-
-    filtered = econ[(econ["event_type"].isin(event_types)) & (econ["event"].isin(sel_events))]
-
-    if len(filtered) == 0:
-        st.info("No events match the current filters.")
-        return
-
-    # Grouped bar: Old vs New for key metrics
-    st.subheader("Old vs New Plan Comparison")
-
-    metric_options = {
-        "Capital ($MM)": ("old_capex_dollars", "new_capex_dollars", 1e6),
-        "NPV10 ($MM)": ("old_npv10_dollars", "new_npv10_dollars", 1e6),
-        "Reserves (Mboe)": ("old_reserves_boe", "new_reserves_boe", 1e3),
-        "Lifetime Revenue ($MM)": ("old_lifetime_revenue_dollars", "new_lifetime_revenue_dollars", 1e6),
-        "Lifetime Operating Income ($MM)": ("old_lifetime_operating_income_dollars", "new_lifetime_operating_income_dollars", 1e6),
-        "Lifetime Cash Flow ($MM)": ("old_lifetime_cash_flow_dollars", "new_lifetime_cash_flow_dollars", 1e6),
-    }
-    sel_metric = st.selectbox("Metric", list(metric_options.keys()), key="ei_metric")
-    old_col, new_col, divisor = metric_options[sel_metric]
-
-    non_creation = filtered[filtered["event_type"] != "Creation"]
-    if len(non_creation) > 0:
-        fig = go.Figure()
-        fig.add_trace(go.Bar(name="Old / Reference", x=non_creation["event"].astype(str),
-                             y=non_creation[old_col] / divisor, marker_color=COLOR_OLD))
-        fig.add_trace(go.Bar(name="New / Opportunity", x=non_creation["event"].astype(str),
-                             y=non_creation[new_col] / divisor, marker_color=COLOR_NEW))
-        fig.update_layout(barmode="group")
-        _base_layout(fig, f"{sel_metric}: Old vs New (Consolidations & Extensions)", "Event #", sel_metric)
-        st.plotly_chart(fig, use_container_width=True)
-
-    creation_f = filtered[filtered["event_type"] == "Creation"]
-    if len(creation_f) > 0:
-        fig_c = go.Figure(go.Bar(
-            x=creation_f["event"].astype(str),
-            y=creation_f[new_col] / divisor,
-            marker_color=COLOR_CREATION,
-        ))
-        _base_layout(fig_c, f"{sel_metric}: New Inventory", "Event #", sel_metric)
-        st.plotly_chart(fig_c, use_container_width=True)
-
-    # Distribution of deltas
-    st.subheader("Delta Distribution")
-    delta_options = {
-        "Capital Delta ($MM)": ("capex_delta_dollars", 1e6),
-        "NPV10 Delta ($MM)": ("npv10_delta_dollars", 1e6),
-        "Reserves Delta (Mboe)": ("reserves_delta_boe", 1e3),
-        "OI Delta ($MM)": ("operating_income_delta_dollars", 1e6),
-    }
-    sel_delta = st.selectbox("Delta Metric", list(delta_options.keys()), key="ei_delta")
-    dcol, ddiv = delta_options[sel_delta]
-    fig_hist = px.histogram(
-        filtered, x=filtered[dcol] / ddiv, color="event_type",
-        nbins=30, labels={"x": sel_delta, "color": "Event Type"},
-        color_discrete_map={"Consolidation": COLOR_CONSOLIDATION, "Extension": COLOR_EXTENSION, "Creation": COLOR_CREATION},
-    )
-    _base_layout(fig_hist, f"Distribution of {sel_delta}", sel_delta, "Count")
-    st.plotly_chart(fig_hist, use_container_width=True)
-
-    # Scatter with selectable axes
-    st.subheader("Indicator Scatter")
-    scatter_options = {
-        "Capital ($MM)": ("new_capex_dollars", 1e6),
-        "NPV10 ($MM)": ("new_npv10_dollars", 1e6),
-        "Reserves (Mboe)": ("new_reserves_boe", 1e3),
-        "Cost of Reserves ($/boe)": ("new_cost_of_reserves_derived", 1),
-        "NPV/Investment": ("new_npv_inv_ratio", 1),
-        "Payout (years)": ("new_payout_source", 1),
-        "ROR (%)": ("new_ror_pct", 1),
-        "1st Year Rate (boepd)": ("new_first_year_rate_boepd", 1),
-    }
-    sc1, sc2 = st.columns(2)
-    x_sel = sc1.selectbox("X-Axis", list(scatter_options.keys()), index=0, key="ei_sx")
-    y_sel = sc2.selectbox("Y-Axis", list(scatter_options.keys()), index=1, key="ei_sy")
-    x_col, x_div = scatter_options[x_sel]
-    y_col, y_div = scatter_options[y_sel]
-
-    fig_sc = px.scatter(
-        filtered, x=filtered[x_col] / x_div, y=filtered[y_col] / y_div,
-        color="event_type", hover_data={"event": True},
-        labels={"x": x_sel, "y": y_sel, "color": "Event Type"},
-        color_discrete_map={"Consolidation": COLOR_CONSOLIDATION, "Extension": COLOR_EXTENSION, "Creation": COLOR_CREATION},
-    )
-    _base_layout(fig_sc, f"{y_sel} vs {x_sel}", x_sel, y_sel)
-    st.plotly_chart(fig_sc, use_container_width=True)
-
 
 def render_event_explorer(
     econ: pd.DataFrame,
@@ -1319,7 +1223,26 @@ def render_event_explorer(
         st.info("No events match filter.")
         return
 
-    sel_event = fc2.selectbox("Event #", avail_events, key="ee_ev")
+    def _event_selector_label(event_number: int) -> str:
+        row = econ[econ["event"] == event_number].iloc[0]
+        event_type = row["event_type"]
+        uwi_1 = row.get(COL_OLD_UWI_1)
+        uwi_2 = row.get(COL_OLD_UWI_2)
+        uwis = [str(v) for v in (uwi_1, uwi_2) if pd.notna(v) and str(v).strip()]
+        if event_type == "Consolidation":
+            detail = " + ".join(uwis) if uwis else row["new_type_curve_used"]
+            return f"UWIs: {detail}"
+        if event_type == "Extension":
+            detail = uwis[0] if uwis else row["new_type_curve_used"]
+            return f"Extension: {detail}"
+        return f"Creation: {row['new_type_curve_used']}"
+
+    sel_event = fc2.selectbox(
+        "UWIs / Creation / Extension",
+        avail_events,
+        format_func=_event_selector_label,
+        key="ee_ev",
+    )
 
     ev = econ[econ["event"] == sel_event].iloc[0]
 
@@ -1339,14 +1262,14 @@ def render_event_explorer(
     old_label = "No Prior Opportunity" if ev["event_type"] == "Creation" else "Old / Reference"
 
     bridge_data = [
-        ("Capital", fmt_mm(ev["old_capex_dollars"]), fmt_mm(ev["new_capex_dollars"]), fmt_mm(ev["capex_delta_dollars"])),
-        ("NPV10", fmt_mm(ev["old_npv10_dollars"]), fmt_mm(ev["new_npv10_dollars"]), fmt_mm(ev["npv10_delta_dollars"])),
-        ("Lifetime Revenue", fmt_mm(ev["old_lifetime_revenue_dollars"]), fmt_mm(ev["new_lifetime_revenue_dollars"]), fmt_mm(ev["revenue_delta_dollars"])),
-        ("Lifetime OI", fmt_mm(ev["old_lifetime_operating_income_dollars"]), fmt_mm(ev["new_lifetime_operating_income_dollars"]), fmt_mm(ev["operating_income_delta_dollars"])),
-        ("Lifetime Cash Flow", fmt_mm(ev["old_lifetime_cash_flow_dollars"]), fmt_mm(ev["new_lifetime_cash_flow_dollars"]), fmt_mm(ev["cash_flow_delta_dollars"])),
-        ("Reserves", fmt_mboe(ev["old_reserves_boe"]), fmt_mboe(ev["new_reserves_boe"]), fmt_mboe(ev["reserves_delta_boe"])),
+        ("Capital", fmt_mm(ev["old_capex_dollars"]), fmt_mm(ev["new_capex_dollars"]), fmt_signed_mm(ev["capex_delta_dollars"])),
+        ("NPV10", fmt_mm(ev["old_npv10_dollars"]), fmt_mm(ev["new_npv10_dollars"]), fmt_signed_mm(ev["npv10_delta_dollars"])),
+        ("Lifetime Revenue", fmt_mm(ev["old_lifetime_revenue_dollars"]), fmt_mm(ev["new_lifetime_revenue_dollars"]), fmt_signed_mm(ev["revenue_delta_dollars"])),
+        ("Lifetime OI", fmt_mm(ev["old_lifetime_operating_income_dollars"]), fmt_mm(ev["new_lifetime_operating_income_dollars"]), fmt_signed_mm(ev["operating_income_delta_dollars"])),
+        ("Lifetime Cash Flow", fmt_mm(ev["old_lifetime_cash_flow_dollars"]), fmt_mm(ev["new_lifetime_cash_flow_dollars"]), fmt_signed_mm(ev["cash_flow_delta_dollars"])),
+        ("Reserves", fmt_mboe(ev["old_reserves_boe"]), fmt_mboe(ev["new_reserves_boe"]), fmt_signed_mboe(ev["reserves_delta_boe"])),
         ("Cost of Reserves", fmt_dollarboe(ev["old_cost_of_reserves"]), fmt_dollarboe(ev["new_cost_of_reserves_derived"]),
-         fmt_dollarboe(ev["cost_of_reserves_delta"]) if pd.notna(ev.get("cost_of_reserves_delta")) else "N/A"),
+         fmt_signed_dollarboe(ev["cost_of_reserves_delta"]) if pd.notna(ev.get("cost_of_reserves_delta")) else "N/A"),
         ("Payout", fmt_years(ev["old_payout_years"]), fmt_years(ev["new_payout_derived"]), "—"),
         ("NPV / Investment", fmt_ratio(ev["old_npv_inv_ratio_derived"]), fmt_ratio(ev["new_npv_inv_ratio"]), "—"),
         ("OI Margin $/boe", fmt_dollarboe(ev["old_lifetime_oi_per_boe"]), fmt_dollarboe(ev["new_lifetime_oi_per_boe"]), "—"),
@@ -1354,14 +1277,14 @@ def render_event_explorer(
     ]
 
     if ev["event_type"] == "Creation":
-        bridge_df = pd.DataFrame(bridge_data, columns=["Metric", old_label, "New / Opportunity", "Delta"])
+        bridge_df = pd.DataFrame(bridge_data, columns=["Metric", old_label, "New / Opportunity", "Change (+ added / - removed)"])
         # Clear old column for creations
         bridge_df[old_label] = "—"
-        bridge_df["Delta"] = "—"
+        bridge_df["Change (+ added / - removed)"] = "—"
         bridge_df.loc[bridge_df["Metric"].isin(["Capital", "NPV10", "Lifetime Revenue", "Lifetime OI",
-                                                  "Lifetime Cash Flow", "Reserves"]), "Delta"] = "N/A (new inventory)"
+                                                  "Lifetime Cash Flow", "Reserves"]), "Change (+ added / - removed)"] = "N/A (new inventory)"
     else:
-        bridge_df = pd.DataFrame(bridge_data, columns=["Metric", old_label, "New / Opportunity", "Delta"])
+        bridge_df = pd.DataFrame(bridge_data, columns=["Metric", old_label, "New / Opportunity", "Change (+ added / - removed)"])
 
     st.dataframe(bridge_df, use_container_width=True, hide_index=True)
 
@@ -1541,64 +1464,6 @@ def render_downloads(
     c7.download_button("All Outputs ZIP", zip_bytes, "calculated_outputs.zip", "application/zip", key="dl_zip")
 
 
-def render_data_quality(
-    validation_report: pd.DataFrame,
-    wells_classified: pd.DataFrame,
-    indicators_clean: pd.DataFrame,
-    forecasts_clean: pd.DataFrame,
-):
-    st.header("Data Quality")
-
-    st.subheader("Workbook Information")
-    ic1, ic2, ic3 = st.columns(3)
-    ic1.markdown(f"**Workbook:** `{WORKBOOK_PATH}`")
-    try:
-        mtime = WORKBOOK_PATH.stat().st_mtime
-        import datetime
-        ic2.markdown(f"**Modified:** {datetime.datetime.fromtimestamp(mtime)}")
-    except Exception:
-        ic2.markdown("**Modified:** Unknown")
-    ic3.markdown(f"**Sheets:** {SHEET_WELLS}, {SHEET_ECONOMIC_INDICATORS}, {SHEET_FORECASTS}")
-
-    st.subheader("Row Counts")
-    rc1, rc2, rc3 = st.columns(3)
-    rc1.metric("Wells Rows", f"{len(wells_classified):,}")
-    rc2.metric("Indicator Rows", f"{len(indicators_clean):,}")
-    rc3.metric("Forecast Rows", f"{len(forecasts_clean):,}")
-
-    st.subheader("Event Classification")
-    vc = wells_classified["event_type"].value_counts()
-    for et in ["Consolidation", "Extension", "Creation"]:
-        st.write(f"- **{et}:** {vc.get(et, 0):,}")
-
-    st.subheader("Type Curve Coverage")
-    ref_curves = set()
-    ref_curves.update(wells_classified[COL_NEW_CURVE].dropna().unique())
-    ref_curves.update(wells_classified[COL_OLD_CURVE_1].dropna().unique())
-    ref_curves.update(wells_classified[COL_OLD_CURVE_2].dropna().unique())
-    ref_curves.discard("")
-
-    ind_curves = set(indicators_clean[COL_TYPE_CURVE].dropna().unique())
-    fc_curves = set(forecasts_clean[COL_TYPE_CURVE].dropna().unique())
-
-    st.write(f"- **Referenced curves:** {len(ref_curves)}")
-    st.write(f"- **Found in indicators:** {len(ref_curves & ind_curves)}")
-    st.write(f"- **Found in forecasts:** {len(ref_curves & fc_curves)}")
-    st.write(f"- **Extra in indicators (unused):** {len(ind_curves - ref_curves)}")
-    st.write(f"- **Extra in forecasts (unused):** {len(fc_curves - ref_curves)}")
-
-    missing_ind = ref_curves - ind_curves
-    missing_fc = ref_curves - fc_curves
-    if missing_ind:
-        st.error(f"Missing from indicators: {missing_ind}")
-    if missing_fc:
-        st.error(f"Missing from forecasts: {missing_fc}")
-
-    st.subheader("Validation Report")
-    st.dataframe(validation_report, use_container_width=True, hide_index=True)
-    st.download_button("Download Validation Report", dataframe_to_csv_bytes(validation_report),
-                       "validation_report.csv", "text/csv", key="dq_dl_vr")
-
 
 # ════════════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -1656,10 +1521,8 @@ def main():
             "Executive Summary",
             "Existing Plan Optimization",
             "Inventory Opportunities",
-            "Economic Indicators",
             "Event Explorer",
             "Data & Downloads",
-            "Data Quality",
         ],
     )
 
@@ -1669,15 +1532,11 @@ def main():
         render_existing_plan_optimization(econ, event_forecasts)
     elif page == "Inventory Opportunities":
         render_inventory_opportunities(econ)
-    elif page == "Economic Indicators":
-        render_economic_indicators(econ, indicators_clean)
     elif page == "Event Explorer":
         render_event_explorer(econ, wells_classified, indicators_clean, forecasts_clean, event_forecasts, event_annual)
     elif page == "Data & Downloads":
         render_downloads(econ, exec_summary, event_forecasts, event_annual, validation_report,
                          wells_classified, indicators_clean, forecasts_clean)
-    elif page == "Data Quality":
-        render_data_quality(validation_report, wells_classified, indicators_clean, forecasts_clean)
 
 
 if __name__ == "__main__":
