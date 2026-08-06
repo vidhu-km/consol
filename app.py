@@ -553,7 +553,6 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     c1.metric('Count', f'{len(consol):,}')
     c2.metric('Total Capital Saved', fmt_mm(consol['capital_saved_dollars'].sum()))
     c3.metric('Average Cost of Reserves Improvement', fmt_dollarboe(consol['cost_of_reserves_improvement'].mean()))
-    c4.metric('Total NPV10 / Total Capex', fmt_ratio(total_npv_to_capex(consol)))
     st.subheader('Extension / Enhancement')
     e1, e2, e3 = st.columns(3)
     e1.metric('Count', f'{len(ext):,}')
@@ -565,11 +564,10 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     n2.metric('Total NPV10 Added', fmt_mm(cre['new_npv10_dollars'].sum()))
     st.subheader('Category Summary')
     display = exec_summary.copy()
-    display = display.rename(columns={'category': 'Category', 'event_story': 'Description', 'count': 'Count', 'total_capital_saved_dollars': 'Total Capital Saved', 'average_cost_of_reserves_improvement': 'Average Cost of Reserves Improvement', 'total_npv10_to_total_capex': 'Total NPV10 / Total Capex', 'incremental_npv10_dollars': 'Incremental NPV10', 'incremental_npv10_pct': 'Incremental NPV10 %', 'total_npv10_added_dollars': 'Total NPV10 Added'})
+    display = display.rename(columns={'category': 'Category', 'event_story': 'Description', 'count': 'Count', 'total_capital_saved_dollars': 'Total Capital Saved', 'average_cost_of_reserves_improvement': 'Average Cost of Reserves Improvement', 'incremental_npv10_dollars': 'Incremental NPV10', 'incremental_npv10_pct': 'Incremental NPV10 %', 'total_npv10_added_dollars': 'Total NPV10 Added'})
     for col in ['Total Capital Saved', 'Incremental NPV10', 'Total NPV10 Added']:
         display[col] = display[col].map(fmt_mm)
     display['Average Cost of Reserves Improvement'] = display['Average Cost of Reserves Improvement'].map(fmt_dollarboe)
-    display['Total NPV10 / Total Capex'] = display['Total NPV10 / Total Capex'].map(fmt_ratio)
     display['Incremental NPV10 %'] = display['Incremental NPV10 %'].map(fmt_pct)
     st.dataframe(display, use_container_width=True, hide_index=True)
 
@@ -587,7 +585,6 @@ def render_existing_plan_optimization(econ: pd.DataFrame, event_forecasts: pd.Da
     m1.metric('Count', f'{len(filtered):,}')
     m2.metric('Total Capital Saved', fmt_mm(filtered['capital_saved_dollars'].sum()))
     m3.metric('Average Cost of Reserves Improvement', fmt_dollarboe(filtered['cost_of_reserves_improvement'].mean()))
-    m4.metric('Total NPV10 / Total Capex', fmt_ratio(total_npv_to_capex(filtered)))
     st.subheader('Event Detail')
     detail = filtered[['event', COL_OLD_UWI_1, COL_OLD_UWI_2, COL_OLD_CURVE_1, COL_OLD_CURVE_2, COL_NEW_CURVE, 'capital_saved_dollars', 'cost_of_reserves_improvement', 'new_npv10_dollars', 'new_capex_dollars']].copy()
     detail['npv10_to_capex'] = detail.apply(lambda r: _safe_div(r['new_npv10_dollars'], r['new_capex_dollars']), axis=1)
