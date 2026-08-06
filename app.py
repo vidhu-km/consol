@@ -799,7 +799,6 @@ def fmt_pct(val: float | None) -> str:
 
 
 def extension_npv_uplift_pct(df: pd.DataFrame) -> float:
-    """Portfolio incremental NPV10 divided by reference-plan NPV10."""
     if df.empty:
         return np.nan
     return 100.0 * _safe_div(
