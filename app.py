@@ -929,7 +929,6 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     st.subheader("Capital Efficiency")
     h1, h2, h3, h4, h5 = st.columns(5)
     h1.metric("Capital Saved", fmt_mm(total_capital_saved))
-    h2.metric("Capital Saved per BOE Lost", fmt_dollarboe(portfolio_saved_per_boe_lost))
     h3.metric("Cost of Reserves Improvement", fmt_dollarboe(portfolio_cor_improvement))
     h4.metric("Locations Eliminated", f"{total_locations_eliminated:,}")
     h5.metric("Incremental NPV10 Added", fmt_mm(total_incremental_npv_added))
@@ -1005,8 +1004,6 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     cb1, cb2, cb3, cb4 = st.columns(4)
     cb1.metric("Consolidation Events", f"{len(consol):,}")
     cb2.metric("Capital Saved", fmt_mm(consol["capital_saved_dollars"].sum()))
-    cb3.metric("Capital Saved per BOE Lost", fmt_dollarboe(_safe_div(
-        consol["capital_saved_dollars"].sum(), consol["boe_lost"].sum())))
     cb4.metric("Locations Eliminated", f"{int(consol['locations_eliminated'].sum()):,}")
 
     cd1, cd2, cd3, cd4 = st.columns(4)
@@ -1014,23 +1011,6 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     cd2.metric("NPV10 Sacrificed", fmt_mm(consol["npv_sacrificed_dollars"].sum()))
     cd3.metric("Cost of Reserves Improvement", fmt_dollarboe(portfolio_cor_improvement))
     cd4.metric("BOE Lost", fmt_boe(consol["boe_lost"].sum()))
-
-    # Chart
-    if len(consol) > 0:
-        df_ranked = consol.sort_values("npv10_delta_dollars", ascending=False).copy()
-        df_ranked["event_label"] = df_ranked["event"].astype(str)
-        df_ranked["color"] = df_ranked["npv10_delta_dollars"].apply(
-            lambda x: COLOR_POSITIVE if x >= 0 else COLOR_NEGATIVE
-        )
-        fig = go.Figure(go.Bar(
-            x=df_ranked["event_label"],
-            y=df_ranked["npv10_delta_dollars"] / 1e6,
-            marker_color=df_ranked["color"],
-            hovertemplate="Event %{x}<br>NPV10 Change: %{y:+.2f} MM<extra></extra>",
-        ))
-        _base_layout(fig, "Consolidation NPV10 Change by Event", "Event #", "NPV10 Change ($MM)")
-        fig.add_hline(y=0, line_dash="dash", line_color="gray")
-        st.plotly_chart(fig, use_container_width=True)
 
     # --- Section D: Inventory Enhancements ---
     st.subheader("Inventory Enhancements Identified (Extensions)")
@@ -1113,8 +1093,6 @@ def render_existing_plan_optimization(econ: pd.DataFrame, event_forecasts: pd.Da
     mc1, mc2, mc3, mc4, mc5 = st.columns(5)
     mc1.metric("Events", f"{len(filtered):,}")
     mc2.metric("Capital Saved", fmt_mm(filtered["capital_saved_dollars"].sum()))
-    mc3.metric("Capital Saved per BOE Lost", fmt_dollarboe(_safe_div(
-        filtered["capital_saved_dollars"].sum(), filtered["boe_lost"].sum())))
     filtered_old_cor = _safe_div(filtered["old_capex_dollars"].sum(), filtered["old_reserves_boe"].sum())
     filtered_new_cor = _safe_div(filtered["new_capex_dollars"].sum(), filtered["new_reserves_boe"].sum())
     mc4.metric("Cost of Reserves Improvement", fmt_dollarboe(
@@ -1345,7 +1323,6 @@ def render_event_explorer(
     if ev["event_type"] == "Consolidation":
         ec1, ec2, ec3, ec4, ec5 = st.columns(5)
         ec1.metric("Capital Saved", fmt_mm(ev["capital_saved_dollars"]))
-        ec2.metric("Capital Saved per BOE Lost", fmt_dollarboe(ev["capital_saved_per_boe_lost"]))
         ec3.metric("Cost of Reserves Improvement", fmt_dollarboe(ev["cost_of_reserves_improvement"]))
         ec4.metric("Locations Eliminated", f"{int(ev['locations_eliminated']):,}")
         ec5.metric("NPV10 Sacrificed", fmt_mm(ev["npv_sacrificed_dollars"]))
@@ -1373,7 +1350,6 @@ def render_event_explorer(
         ("OI Margin $/boe", fmt_dollarboe(ev["old_lifetime_oi_per_boe"]), fmt_dollarboe(ev["new_lifetime_oi_per_boe"]), "—"),
         ("NPV10 per BOE", fmt_dollarboe(ev["old_npv10_per_boe"]), fmt_dollarboe(ev["new_npv10_per_boe"]), "—"),
         ("Capital Saved", "—", "—", fmt_mm(ev["capital_saved_dollars"]) if ev["event_type"] == "Consolidation" else "N/A"),
-        ("Capital Saved per BOE Lost", "—", "—", fmt_dollarboe(ev["capital_saved_per_boe_lost"]) if ev["event_type"] == "Consolidation" else "N/A"),
         ("Cost of Reserves Improvement", "—", "—", fmt_dollarboe(ev["cost_of_reserves_improvement"]) if ev["event_type"] == "Consolidation" else "N/A"),
         ("Locations Eliminated", "—", "—", f"{int(ev['locations_eliminated']):,}" if ev["event_type"] == "Consolidation" else "N/A"),
         ("Incremental NPV10 Added", "—", "—", fmt_signed_mm(ev["incremental_npv10_added_dollars"]) if ev["event_type"] != "Consolidation" else "N/A"),
