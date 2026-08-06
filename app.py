@@ -897,6 +897,20 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
             fig.add_hline(y=0, line_dash="dash", line_color="gray")
             st.plotly_chart(fig, use_container_width=True)
 
+    with col_r:
+        if len(consol) > 0:
+            fig2 = px.scatter(
+                consol, x=consol["capex_delta_dollars"] / 1e6,
+                y=consol["npv10_delta_dollars"] / 1e6,
+                size=consol["new_reserves_boe"].clip(lower=1),
+                hover_data={"event": True},
+                labels={"x": "Capital Delta ($MM)", "y": "NPV10 Delta ($MM)"},
+            )
+            _base_layout(fig2, "Capital vs NPV Delta (Consolidations)", "Capital Delta ($MM)", "NPV10 Delta ($MM)")
+            fig2.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig2.add_vline(x=0, line_dash="dash", line_color="gray")
+            st.plotly_chart(fig2, use_container_width=True)
+
     # --- Section C: Inventory Enhancements ---
     st.subheader("Inventory Enhancements Identified (Extensions)")
     if len(ext) > 0:
