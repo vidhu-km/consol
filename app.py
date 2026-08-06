@@ -1,1398 +1,1683 @@
 """
-=============================================================================
- INVENTORY REDESIGN  —  PROJECT ECONOMICS DASHBOARD
-=============================================================================
-
- Compares BEFORE inventory (legacy wells) with AFTER inventory (enhanced wells)
- across three event types:
-
-     Consolidation : 2 legacy wells (w1 + w2) -> 1 enhanced well  (net -1 well)
-     Extension     : 1 legacy well  (w1)      -> 1 enhanced well  (net  0 wells)
-     Creation      : 0 legacy wells           -> 1 enhanced well  (net +1 well)
-
- "Enhanced entity" = what the combined/extended/created well becomes.
- w1_ent, w2_ent, and enh_ent values all exist as Entity values in economics.xlsx,
- capex.xlsx, and forecast.xlsx.
-
- ─────────────────────────────────────────────────────────────────────────────
- EXPECTED XLSX FORMATS (place next to app.py or in ./data):
- ─────────────────────────────────────────────────────────────────────────────
-
- economics.xlsx  (one row per entity)
-   Entity                              text — the type-curve / entity name
-   Npv Cash Flow BTax 10.0% (M$)      NPV in thousands of dollars
-   Npv Investment BTax  0.0% (M$)     investment in thousands of dollars
-   Payout BTax (years)                payout in years
-   Boe WI Total (boe)                net reserves BOE
-   1st Year Production Rate (boepd)   first-year rate
-   Cost of Reserves ($/boe)           $/boe
-   IP30 Cum (boe)                     IP30 cum production
-   BTax Disc. CF. ROR (%)             ROR percent
-   Initial WI (%)                     working interest percent
-   3 Month Avg Production (boepd)     3-month avg rate
-
- consol.xlsx  (one row per redesign event)
-   consolidation #                     event number
-   well 1 name                         UWI / display name for well 1
-   well 2 name                         UWI / display name for well 2
-   well 1 entity                       type-curve entity for before-well 1
-   well 2 entity                       type-curve entity for before-well 2
-   enhanced well entity                type-curve entity for the enhanced well
-
- forecast.xlsx  (one row per entity per month)
-   entity_name                         type-curve entity name
-   year                                calendar year
-   month                               calendar month 1-12
-   total_revenue                       monthly revenue $
-   operating_income                    monthly operating income $
-   cash_flow                           monthly net cash flow $
-
- capex.xlsx  (one row per entity)
-   entity                              type-curve entity name
-   capex                               total capex $
-
- Run:  streamlit run app.py
-=============================================================================
+Viewfield Bakken Exploitation Review Dashboard
+================================================
+A production-quality Streamlit dashboard that reads economics.xlsx
+and presents the results of a Viewfield Bakken exploitation review.
 """
-
 from __future__ import annotations
 
-import re
+import warnings
+from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
+from typing import Any, Literal
+import zipfile
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
-import plotly.io as pio
 import streamlit as st
 
-# ─── CONFIG ──────────────────────────────────────────────────────────────────
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
-APP_TITLE = "Inventory Redesign — Project Economics"
-APP_SUBTITLE = "Before vs After · 3 Cases · Combined Summary"
-BASE_DIR = Path(__file__).resolve().parent
-SEARCH_DIRS = [BASE_DIR, BASE_DIR / "data"]
+# ════════════════════════════════════════════════════════════════════════════════
+# 1. CONSTANTS AND CONFIGURATION
+# ════════════════════════════════════════════════════════════════════════════════
 
-ECON_MONEY_SCALE = 1_000.0  # Aries M$ -> base $
+APP_DIR = Path(__file__).resolve().parent
+WORKBOOK_PATH = APP_DIR / "economics.xlsx"
 
-CASE_ORDER = ["Consolidation", "Extension", "Creation"]
+SHEET_WELLS = "wells"
+SHEET_ECONOMIC_INDICATORS = "economic indicators"
+SHEET_FORECASTS = "forecasts"
 
-CLR = {
-    "navy": "#12314F", "blue": "#0E6BA8", "teal": "#0E9AA7",
-    "amber": "#C98A1B", "green": "#2E7D5B", "red": "#B3403A",
-    "slate": "#8A9AA9", "light": "#D8E1E8", "ink": "#12222E",
-    "before": "#8A9AA9", "after": "#0E6BA8", "incr": "#0E9AA7",
-}
-CASE_CLR = {
-    "Consolidation": CLR["navy"],
-    "Extension": CLR["teal"],
-    "Creation": CLR["amber"],
-}
+COL_EVENT = "event #"
+COL_OLD_UWI_1 = "old well 1 UWI"
+COL_OLD_UWI_2 = "old well 2 UWI"
+COL_OLD_CURVE_1 = "old well 1 type curve"
+COL_OLD_CURVE_2 = "old well 2 type curve"
+COL_NEW_CURVE = "new well type curve"
 
-st.set_page_config(page_title=APP_TITLE, page_icon="⛽", layout="wide",
-                   initial_sidebar_state="expanded")
+COL_TYPE_CURVE = "type curve"
+COL_NPV10 = "Npv Cash Flow BTax 10.0% (M$)"
+COL_NPV_INVESTMENT_RATIO = "NPV / Disc. Invest BTax"
+COL_PAYOUT = "Payout BTax (years)"
+COL_RESERVES = "Boe WI Total (boe)"
+COL_FIRST_YEAR_RATE = "1st Year Production Rate (boepd)"
+COL_COST_OF_RESERVES = "Cost of Reserves ($/boe)"
+COL_IP30 = "IP30 Cum (boe)"
+COL_CAPEX = "Npv Investment BTax  0.0% (M$)"  # two spaces between BTax and 0.0%
+COL_ROR = "BTax Disc. CF. ROR (%)"
+COL_INITIAL_WI = "Initial WI (%)"
+COL_THREE_MONTH_RATE = "3 Month Avg Production (boepd)"
 
-# ─── STYLING ─────────────────────────────────────────────────────────────────
+COL_FORECAST_MONTH = "month #"
+COL_FORECAST_YEAR = "year"
+COL_FORECAST_REVENUE = "total_revenue ($M)"
+COL_FORECAST_OPERATING_INCOME = "operating_income ($M)"
+COL_FORECAST_CASH_FLOW = "cash_flow ($M)"
 
-CSS = """
-<style>
-  .block-container {padding-top:1.6rem; padding-bottom:3rem; max-width:1500px;}
-  h1,h2,h3,h4 {color:#12222E;}
-  .app-header {border-left:5px solid #0E6BA8; padding:.35rem 0 .35rem .9rem; margin-bottom:1.1rem;}
-  .app-header .t {font-size:1.55rem; font-weight:700; color:#12314F; line-height:1.15;}
-  .app-header .s {font-size:.86rem; color:#66788A; text-transform:uppercase; letter-spacing:.10em; margin-top:.15rem;}
-  .sec {display:flex; align-items:center; gap:.6rem; margin:1.7rem 0 .7rem 0; padding-bottom:.4rem; border-bottom:1px solid #E3E9ED;}
-  .sec .n {font-size:.72rem; font-weight:700; color:#FFF; background:#12314F; border-radius:3px; padding:.10rem .42rem;}
-  .sec .h {font-size:1.05rem; font-weight:650; color:#12314F;}
-  .sec .d {font-size:.80rem; color:#8A9AA9; margin-left:auto;}
-  .kpi {background:#FFF; border:1px solid #E3E9ED; border-radius:8px; padding:.75rem .85rem; height:100%; box-shadow:0 1px 2px rgba(18,49,79,.05); border-top:3px solid #D8E1E8;}
-  .kpi.pos {border-top-color:#2E7D5B;} .kpi.neg {border-top-color:#B3403A;} .kpi.acc {border-top-color:#0E6BA8;}
-  .kpi .l {font-size:.685rem; font-weight:600; color:#7A8A99; text-transform:uppercase; letter-spacing:.055em; line-height:1.25; min-height:2.0em;}
-  .kpi .v {font-size:1.42rem; font-weight:700; color:#12222E; line-height:1.25; margin-top:.18rem;}
-  .kpi .d {font-size:.775rem; font-weight:600; margin-top:.10rem;}
-  .kpi .d.up {color:#2E7D5B;} .kpi .d.dn {color:#B3403A;} .kpi .d.nt {color:#8A9AA9;}
-  .kpi .s {font-size:.705rem; color:#98A6B3; margin-top:.18rem;}
-  .callout {border-radius:8px; padding:.85rem 1rem; margin:.5rem 0 1rem 0; font-size:.90rem; line-height:1.55; border:1px solid;}
-  .callout.good {border-color:#BEDCCB; background:#F2F9F5; color:#1F5A41;}
-  .callout.bad  {border-color:#E7C4C2; background:#FDF5F4; color:#8A2F2A;}
-  .callout.info {border-color:#C9DCEA; background:#F4F9FD; color:#154B72;}
-  .pill {display:inline-block; font-size:.70rem; font-weight:600; padding:.10rem .48rem; border-radius:10px; margin-right:.3rem; color:#FFF;}
-  footer, #MainMenu {visibility:hidden;}
-</style>
-"""
+MONEY_TO_DOLLARS = 1_000.0
 
-pio.templates["execdash"] = go.layout.Template(
-    layout=dict(
-        font=dict(family="Inter, Segoe UI, Helvetica, sans-serif", size=12, color=CLR["ink"]),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        colorway=[CLR["navy"], CLR["blue"], CLR["teal"], CLR["amber"], CLR["green"], CLR["red"]],
-        margin=dict(l=60, r=25, t=55, b=55),
-        title=dict(font=dict(size=15, color=CLR["navy"]), x=0.0, xanchor="left"),
-        xaxis=dict(gridcolor="#EEF2F5", zerolinecolor="#D8E1E8", linecolor="#D8E1E8"),
-        yaxis=dict(gridcolor="#EEF2F5", zerolinecolor="#D8E1E8", linecolor="#D8E1E8"),
-        legend=dict(orientation="h", y=-0.18, x=0, font=dict(size=11), bgcolor="rgba(0,0,0,0)"),
-        hoverlabel=dict(font_size=12, bgcolor="#FFFFFF", bordercolor="#D8E1E8"),
-    )
+REQUIRED_WELLS_COLS = (
+    COL_EVENT, COL_OLD_UWI_1, COL_OLD_UWI_2,
+    COL_OLD_CURVE_1, COL_OLD_CURVE_2, COL_NEW_CURVE,
 )
-pio.templates.default = "plotly_white+execdash"
+REQUIRED_INDICATOR_COLS = (
+    COL_TYPE_CURVE, COL_NPV10, COL_NPV_INVESTMENT_RATIO, COL_PAYOUT,
+    COL_RESERVES, COL_FIRST_YEAR_RATE, COL_COST_OF_RESERVES, COL_IP30,
+    COL_CAPEX, COL_ROR, COL_INITIAL_WI, COL_THREE_MONTH_RATE,
+)
+REQUIRED_FORECAST_COLS = (
+    COL_TYPE_CURVE, COL_FORECAST_MONTH, COL_FORECAST_YEAR,
+    COL_FORECAST_REVENUE, COL_FORECAST_OPERATING_INCOME, COL_FORECAST_CASH_FLOW,
+)
 
-
-# ─── FORMATTERS ──────────────────────────────────────────────────────────────
-
-DASH = "—"
-
-
-def _bad(v) -> bool:
-    if v is None:
-        return True
-    try:
-        return not np.isfinite(float(v))
-    except (TypeError, ValueError):
-        return True
-
-
-def safe_div(a, b):
-    if _bad(a) or _bad(b) or float(b) == 0:
-        return np.nan
-    return float(a) / float(b)
-
-
-def fmt_money(v, signed=False):
-    if _bad(v):
-        return DASH
-    v = float(v)
-    s = "-" if v < 0 else ("+" if signed and v > 0 else "")
-    a = abs(v)
-    if a >= 1e9:
-        return f"{s}${a / 1e9:,.1f}B"
-    if a >= 1e6:
-        return f"{s}${a / 1e6:,.1f}MM"
-    if a >= 1e3:
-        return f"{s}${a / 1e3:,.1f}K"
-    return f"{s}${a:,.0f}"
-
-
-def fmt_vol(v, signed=False):
-    if _bad(v):
-        return DASH
-    v = float(v)
-    s = "-" if v < 0 else ("+" if signed and v > 0 else "")
-    a = abs(v)
-    if a >= 1e6:
-        return f"{s}{a / 1e6:,.1f} MMboe"
-    if a >= 1e3:
-        return f"{s}{a / 1e3:,.1f} Mboe"
-    return f"{s}{a:,.0f} boe"
-
-
-def fmt_rate(v, signed=False):
-    if _bad(v):
-        return DASH
-    s = "+" if signed and v > 0 else ""
-    return f"{s}{v:,.0f} boe/d"
-
-
-def fmt_ratio(v, signed=False):
-    if _bad(v):
-        return DASH
-    s = "+" if signed and v > 0 else ""
-    return f"{s}{v:,.2f}x"
-
-
-def fmt_pct(v, signed=False):
-    if _bad(v):
-        return DASH
-    s = "+" if signed and v > 0 else ""
-    return f"{s}{v:,.1f}%"
-
-
-def fmt_years(v, signed=False):
-    if _bad(v):
-        return DASH
-    s = "+" if signed and v > 0 else ""
-    return f"{s}{v:,.2f} yr"
-
-
-def fmt_usdboe(v, signed=False):
-    if _bad(v):
-        return DASH
-    s = "+" if signed and v > 0 else ""
-    return f"{s}${v:,.2f}/boe"
-
-
-def fmt_int(v, signed=False):
-    if _bad(v):
-        return DASH
-    v = float(v)
-    s = "+" if signed and v > 0 else ""
-    return f"{s}{v:,.0f}"
-
-
-# ─── METRIC DEFINITIONS ─────────────────────────────────────────────────────
-
-METRIC_DEFS = [
-    # (key, label, formatter, good: +1=higher better, -1=lower better, 0=neutral)
-    ("npv", "NPV BTax @10%", fmt_money, +1),
-    ("invest", "Investment BTax @0%", fmt_money, -1),
-    ("capex", "Capex", fmt_money, -1),
-    ("boe", "Net Reserves (BOE)", fmt_vol, +1),
-    ("fy_rate", "1st-Year Rate", fmt_rate, +1),
-    ("ip30", "IP30 Cumulative", fmt_vol, +1),
-    ("avg3", "3-Month Avg Rate", fmt_rate, +1),
-    ("npv_inv", "NPV / Investment", fmt_ratio, +1),
-    ("inv_boe", "Investment / BOE", fmt_usdboe, -1),
-    ("npv_boe", "NPV / BOE", fmt_usdboe, +1),
-    ("payout", "Payout BTax", fmt_years, -1),
-    ("ror", "BTax ROR", fmt_pct, +1),
-    ("cor", "Cost of Reserves", fmt_usdboe, -1),
-    ("wi", "Initial WI", fmt_pct, 0),
+SUM_INDICATOR_COLS = [
+    COL_NPV10, COL_RESERVES, COL_FIRST_YEAR_RATE, COL_IP30,
+    COL_CAPEX, COL_THREE_MONTH_RATE,
 ]
 
-ADD_KEYS = ["npv", "invest", "capex", "boe", "fy_rate", "ip30", "avg3"]
-ALL_ECON_KEYS = [m[0] for m in METRIC_DEFS]
+EVENT_TYPE_MAP = {
+    "Consolidation": "Existing Plan Optimization",
+    "Extension": "Inventory Enhancement Identified",
+    "Creation": "New Inventory Identified",
+}
+
+FAVORABLE_HIGHER = {
+    COL_NPV10, COL_NPV_INVESTMENT_RATIO, COL_RESERVES,
+    COL_FIRST_YEAR_RATE, COL_IP30, COL_ROR, COL_THREE_MONTH_RATE,
+}
+FAVORABLE_LOWER = {COL_PAYOUT, COL_COST_OF_RESERVES}
+CONTEXT_DEPENDENT = {COL_CAPEX}
+NEUTRAL = {COL_INITIAL_WI}
+
+# Color palette
+COLOR_OLD = "#8e99a4"
+COLOR_NEW = "#1f77b4"
+COLOR_POSITIVE = "#2ca02c"
+COLOR_NEGATIVE = "#d62728"
+COLOR_CREATION = "#7f3fbf"
+COLOR_EXTENSION = "#17becf"
+COLOR_CONSOLIDATION = "#1f77b4"
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 2. WORKBOOK LOADING
+# ════════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(show_spinner="Loading economics.xlsx …")
+def load_workbook(path: str, modified_time_ns: int) -> dict[str, pd.DataFrame]:
+    """Read the three required worksheets from the workbook."""
+    sheets = pd.read_excel(
+        path,
+        sheet_name=[SHEET_WELLS, SHEET_ECONOMIC_INDICATORS, SHEET_FORECASTS],
+        engine="openpyxl",
+    )
+    return sheets
 
 
-# ─── FILE LOADING (hardcoded columns) ───────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════════
+# 3. SCHEMA VALIDATION
+# ════════════════════════════════════════════════════════════════════════════════
 
-def _find(stem: str) -> Path | None:
-    for d in SEARCH_DIRS:
-        if not d.exists():
-            continue
-        for p in sorted(d.iterdir()):
-            if (p.is_file() and p.suffix.lower() in (".xlsx", ".csv")
-                    and p.stem.strip().lower() == stem.lower()
-                    and not p.name.startswith("~$")):
-                return p
-    return None
+def _check_columns(df: pd.DataFrame, required: tuple[str, ...], sheet_name: str) -> list[str]:
+    """Return list of missing columns."""
+    actual = set(df.columns)
+    return [c for c in required if c not in actual]
 
 
-def _read(path: Path) -> pd.DataFrame:
-    if path.suffix.lower() == ".csv":
-        return pd.read_csv(path)
-    return pd.read_excel(path, sheet_name=0)
+def validate_workbook_schema(
+    wells: pd.DataFrame,
+    indicators: pd.DataFrame,
+    forecasts: pd.DataFrame,
+) -> pd.DataFrame:
+    """Run all validation checks. Returns a validation report DataFrame.
+    Raises SystemExit via st.stop() on blocking errors.
+    """
+    rows: list[dict[str, Any]] = []
 
-
-def _strip(v) -> str:
-    """Convert any cell to a stripped string. NaN/None -> empty."""
-    if v is None:
-        return ""
-    if isinstance(v, float) and not np.isfinite(v):
-        return ""
-    s = str(v).strip()
-    if s.lower() in ("nan", "none", "null", "n/a", "na", "#n/a"):
-        return ""
-    return s
-
-
-def _num(v) -> float:
-    """Convert a single cell to float. Bad values -> NaN."""
-    if v is None:
-        return np.nan
-    if isinstance(v, (int, float)):
-        return float(v) if np.isfinite(float(v)) else np.nan
-    s = str(v).replace(",", "").replace("$", "").replace("%", "").strip()
-    if not s or s.lower() in ("nan", "none", "null", "n/a", "na", "#n/a", "-", "."):
-        return np.nan
-    try:
-        return float(s)
-    except ValueError:
-        return np.nan
-
-
-def _maybe_pct(vals: list[float]) -> list[float]:
-    """If all non-NaN values are <= 1.5, assume 0-1 fraction and multiply by 100."""
-    finite = [v for v in vals if not _bad(v)]
-    if finite and max(abs(v) for v in finite) <= 1.5:
-        return [v * 100 if not _bad(v) else np.nan for v in vals]
-    return vals
-
-
-def _col(df: pd.DataFrame, name: str) -> str | None:
-    """Find column by exact match on stripped/lowered name."""
-    target = name.strip().lower()
-    for c in df.columns:
-        if str(c).strip().lower() == target:
-            return c
-    return None
-
-
-@st.cache_data(show_spinner="Loading data…")
-def load_all():
-    """Load all 4 workbooks with hardcoded column names. Returns dicts keyed by entity."""
-
-    # ── ECONOMICS ────────────────────────────────────────────────────────
-    p = _find("economics")
-    if p is None:
-        raise FileNotFoundError("economics.xlsx not found in " + ", ".join(str(d) for d in SEARCH_DIRS))
-    raw = _read(p)
-
-    # Hardcoded column names from your file
-    C_ENT = _col(raw, "Entity")
-    C_NPV = _col(raw, "Npv Cash Flow BTax 10.0% (M$)")
-    C_INV = _col(raw, "Npv Investment BTax  0.0% (M$)")  # note: two spaces before 0.0%
-    C_PAY = _col(raw, "Payout BTax (years)")
-    C_BOE = _col(raw, "Boe WI Total (boe)")
-    C_FYR = _col(raw, "1st Year Production Rate (boepd)")
-    C_COR = _col(raw, "Cost of Reserves ($/boe)")
-    C_IP3 = _col(raw, "IP30 Cum (boe)")
-    C_ROR = _col(raw, "BTax Disc. CF. ROR (%)")
-    C_WI = _col(raw, "Initial WI (%)")
-    C_AV3 = _col(raw, "3 Month Avg Production (boepd)")
-
-    # If the two-space version didn't match, try single space
-    if C_INV is None:
-        C_INV = _col(raw, "Npv Investment BTax 0.0% (M$)")
-
-    # Debug: show what we found
-    found = {
-        "Entity": C_ENT, "NPV": C_NPV, "Invest": C_INV, "Payout": C_PAY,
-        "BOE": C_BOE, "FY Rate": C_FYR, "COR": C_COR, "IP30": C_IP3,
-        "ROR": C_ROR, "WI": C_WI, "Avg3": C_AV3,
-    }
-    econ_debug = {
-        "columns_in_file": list(raw.columns),
-        "columns_matched": {k: v for k, v in found.items() if v is not None},
-        "columns_missing": [k for k, v in found.items() if v is None],
-        "row_count": len(raw),
-    }
-
-    if C_ENT is None:
-        raise ValueError(f"economics.xlsx: no 'Entity' column found. Columns are: {list(raw.columns)}")
-
-    # Build entity dict: entity_string -> metrics dict
-    econ = {}
-    ror_vals, wi_vals, ror_keys, wi_keys = [], [], [], []
-
-    for _, row in raw.iterrows():
-        ent = _strip(row[C_ENT])
-        if not ent:
-            continue
-
-        d = {
-            "npv":     _num(row[C_NPV]) * ECON_MONEY_SCALE if C_NPV else np.nan,
-            "invest":  _num(row[C_INV]) * ECON_MONEY_SCALE if C_INV else np.nan,
-            "payout":  _num(row[C_PAY]) if C_PAY else np.nan,
-            "boe":     _num(row[C_BOE]) if C_BOE else np.nan,
-            "fy_rate": _num(row[C_FYR]) if C_FYR else np.nan,
-            "cor":     _num(row[C_COR]) if C_COR else np.nan,
-            "ip30":    _num(row[C_IP3]) if C_IP3 else np.nan,
-            "ror":     _num(row[C_ROR]) if C_ROR else np.nan,
-            "wi":      _num(row[C_WI]) if C_WI else np.nan,
-            "avg3":    _num(row[C_AV3]) if C_AV3 else np.nan,
-            "capex":   np.nan,  # filled from capex.xlsx
-        }
-        d["npv_inv"] = safe_div(d["npv"], d["invest"])
-        d["inv_boe"] = safe_div(d["invest"], d["boe"])
-        d["npv_boe"] = safe_div(d["npv"], d["boe"])
-        econ[ent] = d
-
-        ror_vals.append(d["ror"])
-        ror_keys.append(ent)
-        wi_vals.append(d["wi"])
-        wi_keys.append(ent)
-
-    # Fix ROR/WI if stored as fractions
-    ror_vals = _maybe_pct(ror_vals)
-    wi_vals = _maybe_pct(wi_vals)
-    for i, ent in enumerate(ror_keys):
-        econ[ent]["ror"] = ror_vals[i]
-    for i, ent in enumerate(wi_keys):
-        econ[ent]["wi"] = wi_vals[i]
-
-    # ── CAPEX ────────────────────────────────────────────────────────────
-    p = _find("capex")
-    if p is None:
-        raise FileNotFoundError("capex.xlsx not found")
-    raw = _read(p)
-
-    C_CENT = None
-    C_CCAP = None
-    for c in raw.columns:
-        cl = str(c).strip().lower()
-        if cl in ("entity", "entity_name", "well"):
-            C_CENT = c
-        if cl in ("capex", "capital", "total_capex"):
-            C_CCAP = c
-
-    if C_CENT and C_CCAP:
-        for _, row in raw.iterrows():
-            ent = _strip(row[C_CENT])
-            if not ent:
-                continue
-            val = _num(row[C_CCAP])
-            if ent in econ:
-                existing = econ[ent].get("capex", np.nan)
-                if _bad(existing):
-                    econ[ent]["capex"] = val
-                else:
-                    econ[ent]["capex"] = existing + (val if not _bad(val) else 0)
-            # Also store for entities that might only be in capex
-            if ent not in econ:
-                econ[ent] = {k: np.nan for k in ALL_ECON_KEYS}
-                econ[ent]["capex"] = val
-
-    # ── CONSOL ───────────────────────────────────────────────────────────
-    p = _find("consol")
-    if p is None:
-        raise FileNotFoundError("consol.xlsx not found")
-    raw = _read(p)
-
-    # Hardcoded column names
-    C_CID = _col(raw, "consolidation #")
-    C_W1N = _col(raw, "well 1 name")
-    C_W2N = _col(raw, "well 2 name")
-    C_W1E = _col(raw, "well 1 entity")
-    C_W2E = _col(raw, "well 2 entity")
-    C_ENH = _col(raw, "enhanced well entity")
-
-    if C_W1E is None:
-        raise ValueError(f"consol.xlsx: no 'well 1 entity' column. Columns: {list(raw.columns)}")
-    if C_ENH is None:
-        raise ValueError(f"consol.xlsx: no 'enhanced well entity' column. Columns: {list(raw.columns)}")
-
-    consol_rows = []
-    for i, row in raw.iterrows():
-        eid = _strip(row[C_CID]) if C_CID else ""
-        if not eid:
-            eid = f"EVT-{i + 1:04d}"
-        w1_name = _strip(row[C_W1N]) if C_W1N else ""
-        w2_name = _strip(row[C_W2N]) if C_W2N else ""
-        w1_ent = _strip(row[C_W1E])
-        w2_ent = _strip(row[C_W2E]) if C_W2E else ""
-        enh_ent = _strip(row[C_ENH])
-
-        if not enh_ent:
-            continue  # skip rows with no enhanced entity
-
-        n_src = (1 if w1_ent else 0) + (1 if w2_ent else 0)
-        if n_src == 2:
-            case = "Consolidation"
-        elif n_src == 1:
-            case = "Extension"
-        else:
-            case = "Creation"
-
-        consol_rows.append({
-            "event_id": eid, "case": case,
-            "w1_name": w1_name, "w2_name": w2_name,
-            "w1_ent": w1_ent, "w2_ent": w2_ent, "enh_ent": enh_ent,
+    def _add(severity: str, check: str, status: str, affected: int = 0, details: str = ""):
+        rows.append({
+            "severity": severity,
+            "check": check,
+            "status": status,
+            "affected_count": affected,
+            "details": details,
         })
 
-    consol = consol_rows  # list of dicts
+    blocking = False
 
-    # ── FORECAST ─────────────────────────────────────────────────────────
-    p = _find("forecast")
-    if p is None:
-        raise FileNotFoundError("forecast.xlsx not found")
-    raw = _read(p)
+    # -- Columns ---
+    for label, df, req in [
+        (SHEET_WELLS, wells, REQUIRED_WELLS_COLS),
+        (SHEET_ECONOMIC_INDICATORS, indicators, REQUIRED_INDICATOR_COLS),
+        (SHEET_FORECASTS, forecasts, REQUIRED_FORECAST_COLS),
+    ]:
+        missing = _check_columns(df, req, label)
+        if missing:
+            _add("BLOCKING", f"{label} columns", "FAIL", len(missing), f"Missing: {missing}")
+            blocking = True
+        else:
+            _add("INFO", f"{label} columns", "PASS")
 
-    C_FENT = None
-    C_FYR2 = None
-    C_FMO = None
-    C_FREV = None
-    C_FOPI = None
-    C_FCF = None
-    for c in raw.columns:
-        cl = str(c).strip().lower()
-        if cl in ("entity_name", "entity", "well"):
-            C_FENT = c
-        elif cl in ("year", "yr", "cal_year"):
-            C_FYR2 = c
-        elif cl in ("month", "mo", "cal_month"):
-            C_FMO = c
-        elif cl in ("total_revenue", "revenue"):
-            C_FREV = c
-        elif cl in ("operating_income", "op_income"):
-            C_FOPI = c
-        elif cl in ("cash_flow", "cashflow", "net_cash_flow"):
-            C_FCF = c
-
-    fc_rows = []
-    if C_FENT and C_FYR2 and C_FMO:
-        for _, row in raw.iterrows():
-            ent = _strip(row[C_FENT])
-            if not ent:
-                continue
-            yr = _num(row[C_FYR2])
-            mo = _num(row[C_FMO])
-            if _bad(yr) or _bad(mo):
-                continue
-            yr, mo = int(yr), int(mo)
-            if not (1900 <= yr <= 2200 and 1 <= mo <= 12):
-                continue
-            fc_rows.append({
-                "entity": ent,
-                "date": pd.Timestamp(yr, mo, 1),
-                "revenue": _num(row[C_FREV]) if C_FREV else 0.0,
-                "opinc": _num(row[C_FOPI]) if C_FOPI else 0.0,
-                "cf": _num(row[C_FCF]) if C_FCF else 0.0,
-            })
-
-    fc = pd.DataFrame(fc_rows) if fc_rows else pd.DataFrame(
-        columns=["entity", "date", "revenue", "opinc", "cf"])
-    for c in ["revenue", "opinc", "cf"]:
-        fc[c] = fc[c].fillna(0.0)
-
-    debug = {
-        "econ_entities": len(econ),
-        "econ_columns": econ_debug,
-        "consol_events": len(consol),
-        "fc_rows": len(fc),
-        "sample_econ_keys": list(econ.keys())[:10],
-        "sample_consol_enh": [r["enh_ent"] for r in consol[:5]],
-        "sample_consol_w1": [r["w1_ent"] for r in consol[:5]],
-    }
-
-    return econ, consol, fc, debug
-
-
-# ─── BUILD EVENT ECONOMICS ──────────────────────────────────────────────────
-
-def _get(econ: dict, entity: str) -> dict:
-    """Look up an entity in the econ dict. Returns metrics or all-NaN."""
-    if not entity:
-        return {k: np.nan for k in ALL_ECON_KEYS}
-    # Exact match first
-    if entity in econ:
-        return dict(econ[entity])
-    # Try case-insensitive
-    entity_upper = entity.upper()
-    for k, v in econ.items():
-        if k.upper() == entity_upper:
-            return dict(v)
-    return {k: np.nan for k in ALL_ECON_KEYS}
-
-
-def _sum_sides(dicts: list[dict]) -> dict:
-    """Aggregate multiple entity dicts into one side."""
-    if not dicts:
-        out = {k: 0.0 for k in ALL_ECON_KEYS}
-        out["n_wells"] = 0
-        return out
-
-    out = {}
-    for k in ADD_KEYS:
-        vals = [d[k] for d in dicts if not _bad(d[k])]
-        out[k] = sum(vals) if vals else np.nan
-
-    def _wavg(metric, wt):
-        pairs = [(d[metric], d[wt]) for d in dicts
-                 if not _bad(d.get(metric)) and not _bad(d.get(wt))]
-        if not pairs:
-            return np.nan
-        num = sum(m * w for m, w in pairs)
-        den = sum(w for _, w in pairs)
-        return safe_div(num, den)
-
-    out["payout"] = _wavg("payout", "invest")
-    out["ror"] = _wavg("ror", "invest")
-    out["cor"] = _wavg("cor", "boe")
-    out["wi"] = _wavg("wi", "boe")
-    out["npv_inv"] = safe_div(out["npv"], out["invest"])
-    out["inv_boe"] = safe_div(out["invest"], out["boe"])
-    out["npv_boe"] = safe_div(out["npv"], out["boe"])
-    out["n_wells"] = len(dicts)
-    return out
-
-
-@st.cache_data(show_spinner="Building event model…")
-def build_events():
-    econ, consol, fc, debug = load_all()
-
-    rows = []
-    for ev in consol:
-        w1_ent = ev["w1_ent"]
-        w2_ent = ev["w2_ent"]
-        enh_ent = ev["enh_ent"]
-
-        # Before side
-        before_list = []
-        if w1_ent:
-            before_list.append(_get(econ, w1_ent))
-        if w2_ent and w2_ent != w1_ent:
-            before_list.append(_get(econ, w2_ent))
-
-        before = _sum_sides(before_list)
-
-        # After side = the single enhanced entity
-        after = _get(econ, enh_ent)
-        after["n_wells"] = 1
-
-        # Check what matched
-        enh_found = enh_ent in econ or any(k.upper() == enh_ent.upper() for k in econ)
-        w1_found = (not w1_ent) or w1_ent in econ or any(k.upper() == w1_ent.upper() for k in econ)
-        w2_found = (not w2_ent) or w2_ent in econ or any(k.upper() == w2_ent.upper() for k in econ)
-
-        row = dict(ev)  # event_id, case, w1_name, w2_name, w1_ent, w2_ent, enh_ent
-        row["wells_before"] = before["n_wells"]
-        row["wells_after"] = 1
-        row["wells_net"] = 1 - before["n_wells"]
-        row["enh_found"] = enh_found
-        row["w1_found"] = w1_found
-        row["w2_found"] = w2_found
-
-        for k in ALL_ECON_KEYS:
-            bv = before.get(k, np.nan)
-            av = after.get(k, np.nan)
-            row[f"before_{k}"] = bv
-            row[f"after_{k}"] = av
-            row[f"delta_{k}"] = (av - bv) if not (_bad(av) or _bad(bv)) else np.nan
-
-        rows.append(row)
-
-    ev_df = pd.DataFrame(rows) if rows else pd.DataFrame()
-    if not ev_df.empty:
-        ev_df["invest_saved"] = -ev_df["delta_invest"]
-        ev_df["capex_saved"] = -ev_df["delta_capex"]
-
-    return ev_df, consol, fc, econ, debug
-
-
-# ─── AGGREGATE ───────────────────────────────────────────────────────────────
-
-def _aggregate(ev: pd.DataFrame) -> dict:
-    """Aggregate event rows into a summary dict."""
-    out = {
-        "n_events": len(ev),
-        "wells_before": ev["wells_before"].sum(),
-        "wells_after": ev["wells_after"].sum(),
-        "wells_net": ev["wells_net"].sum(),
-    }
-    for side in ("before", "after"):
-        for k in ADD_KEYS:
-            out[f"{side}_{k}"] = ev[f"{side}_{k}"].sum(min_count=1)
-
-        def _wa(metric, weight):
-            m = ev[f"{side}_{metric}"]
-            w = ev[f"{side}_{weight}"]
-            valid = m.notna() & w.notna() & (w != 0)
-            if valid.sum() == 0:
-                return np.nan
-            return float((m[valid] * w[valid]).sum() / w[valid].sum())
-
-        out[f"{side}_payout"] = _wa("payout", "invest")
-        out[f"{side}_ror"] = _wa("ror", "invest")
-        out[f"{side}_cor"] = _wa("cor", "boe")
-        out[f"{side}_wi"] = _wa("wi", "boe")
-        out[f"{side}_npv_inv"] = safe_div(out[f"{side}_npv"], out[f"{side}_invest"])
-        out[f"{side}_inv_boe"] = safe_div(out[f"{side}_invest"], out[f"{side}_boe"])
-        out[f"{side}_npv_boe"] = safe_div(out[f"{side}_npv"], out[f"{side}_boe"])
-
-    for k in ALL_ECON_KEYS:
-        b, a = out.get(f"before_{k}", np.nan), out.get(f"after_{k}", np.nan)
-        out[f"delta_{k}"] = (a - b) if not (_bad(a) or _bad(b)) else np.nan
-
-    out["invest_saved"] = -out["delta_invest"] if not _bad(out.get("delta_invest")) else np.nan
-    out["capex_saved"] = -out["delta_capex"] if not _bad(out.get("delta_capex")) else np.nan
-    out["cap_productivity_idx"] = safe_div(out.get("after_npv_inv"), out.get("before_npv_inv"))
-
-    for k in ADD_KEYS:
-        out[f"before_{k}_pw"] = safe_div(out.get(f"before_{k}"), out["wells_before"])
-        out[f"after_{k}_pw"] = safe_div(out.get(f"after_{k}"), out["wells_after"])
-        bpw, apw = out[f"before_{k}_pw"], out[f"after_{k}_pw"]
-        out[f"delta_{k}_pw"] = (apw - bpw) if not (_bad(apw) or _bad(bpw)) else np.nan
-
-    return out
-
-
-# ─── FORECAST PANEL ──────────────────────────────────────────────────────────
-
-def _build_panel(consol_rows, fc: pd.DataFrame,
-                 event_ids: set | None = None) -> pd.DataFrame:
-    if fc.empty:
-        return pd.DataFrame()
-
-    vals = ["revenue", "opinc", "cf"]
-    parts_before, parts_after = [], []
-
-    for ev in consol_rows:
-        if event_ids is not None and ev["event_id"] not in event_ids:
-            continue
-        for bk in [ev["w1_ent"], ev["w2_ent"]]:
-            if bk:
-                f = fc[fc["entity"] == bk]
-                if f.empty:
-                    f = fc[fc["entity"].str.upper() == bk.upper()]
-                if not f.empty:
-                    parts_before.append(f[["date"] + vals])
-        ek = ev["enh_ent"]
-        if ek:
-            f = fc[fc["entity"] == ek]
-            if f.empty:
-                f = fc[fc["entity"].str.upper() == ek.upper()]
-            if not f.empty:
-                parts_after.append(f[["date"] + vals])
-
-    def _agg(parts):
-        if not parts:
-            return pd.DataFrame()
-        return pd.concat(parts, ignore_index=True).groupby("date", as_index=False)[vals].sum()
-
-    b, a = _agg(parts_before), _agg(parts_after)
-    if b.empty and a.empty:
-        return pd.DataFrame()
-
-    if b.empty:
-        panel = a.rename(columns={v: f"after_{v}" for v in vals})
-        for v in vals:
-            panel[f"before_{v}"] = 0.0
-    elif a.empty:
-        panel = b.rename(columns={v: f"before_{v}" for v in vals})
-        for v in vals:
-            panel[f"after_{v}"] = 0.0
+    # -- event # no nulls, unique, numeric ---
+    if wells[COL_EVENT].isna().any():
+        _add("BLOCKING", "event # no nulls", "FAIL", int(wells[COL_EVENT].isna().sum()))
+        blocking = True
     else:
-        bm = b.rename(columns={v: f"before_{v}" for v in vals})
-        am = a.rename(columns={v: f"after_{v}" for v in vals})
-        panel = bm.merge(am, on="date", how="outer").fillna(0.0).sort_values("date")
+        _add("INFO", "event # no nulls", "PASS")
 
-    for v in vals:
-        panel[f"incr_{v}"] = panel[f"after_{v}"] - panel[f"before_{v}"]
-    for pre in ("before", "after", "incr"):
-        for v in vals:
-            panel[f"cum_{pre}_{v}"] = panel[f"{pre}_{v}"].cumsum()
-    panel["year"] = panel["date"].dt.year
-    return panel.reset_index(drop=True)
+    if wells[COL_EVENT].duplicated().any():
+        _add("BLOCKING", "event # unique", "FAIL", int(wells[COL_EVENT].duplicated().sum()))
+        blocking = True
+    else:
+        _add("INFO", "event # unique", "PASS")
+
+    try:
+        wells[COL_EVENT].astype(int)
+        _add("INFO", "event # numeric", "PASS")
+    except (ValueError, TypeError):
+        _add("BLOCKING", "event # numeric", "FAIL", details="Cannot convert to int")
+        blocking = True
+
+    # -- new well type curve no nulls ---
+    if wells[COL_NEW_CURVE].isna().any():
+        n = int(wells[COL_NEW_CURVE].isna().sum())
+        _add("BLOCKING", "new well type curve no nulls", "FAIL", n)
+        blocking = True
+    else:
+        _add("INFO", "new well type curve no nulls", "PASS")
+
+    # -- indicators unique type curve ---
+    if indicators[COL_TYPE_CURVE].isna().any():
+        _add("BLOCKING", "indicator type curve no nulls", "FAIL")
+        blocking = True
+    if indicators[COL_TYPE_CURVE].duplicated().any():
+        _add("BLOCKING", "indicator type curve unique", "FAIL")
+        blocking = True
+    else:
+        _add("INFO", "indicator type curve unique", "PASS")
+
+    # -- forecasts no nulls in required cols ---
+    for c in REQUIRED_FORECAST_COLS:
+        nn = int(forecasts[c].isna().sum())
+        if nn > 0:
+            _add("BLOCKING", f"forecasts {c} no nulls", "FAIL", nn)
+            blocking = True
+
+    # -- Referenced type curves ---
+    ref_curves = set()
+    ref_curves.update(wells[COL_NEW_CURVE].dropna().unique())
+    ref_curves.update(wells[COL_OLD_CURVE_1].dropna().unique())
+    ref_curves.update(wells[COL_OLD_CURVE_2].dropna().unique())
+
+    ind_curves = set(indicators[COL_TYPE_CURVE].dropna().unique())
+    fc_curves = set(forecasts[COL_TYPE_CURVE].dropna().unique())
+
+    missing_ind = ref_curves - ind_curves
+    missing_fc = ref_curves - fc_curves
+    if missing_ind:
+        _add("BLOCKING", "ref curves in indicators", "FAIL", len(missing_ind), str(missing_ind))
+        blocking = True
+    else:
+        _add("INFO", "ref curves in indicators", "PASS")
+    if missing_fc:
+        _add("BLOCKING", "ref curves in forecasts", "FAIL", len(missing_fc), str(missing_fc))
+        blocking = True
+    else:
+        _add("INFO", "ref curves in forecasts", "PASS")
+
+    # -- Forecast uniqueness by type curve + year + month # ---
+    fc_key = forecasts[[COL_TYPE_CURVE, COL_FORECAST_YEAR, COL_FORECAST_MONTH]]
+    dup_fc = fc_key.duplicated().sum()
+    if dup_fc > 0:
+        _add("BLOCKING", "forecast key unique", "FAIL", int(dup_fc))
+        blocking = True
+    else:
+        _add("INFO", "forecast key unique", "PASS")
+
+    # -- Each referenced forecast curve has identical period count ---
+    ref_fc = forecasts[forecasts[COL_TYPE_CURVE].isin(ref_curves)]
+    curve_counts = ref_fc.groupby(COL_TYPE_CURVE).size()
+    if curve_counts.nunique() > 1:
+        _add("BLOCKING", "forecast period count uniform", "FAIL",
+             details=str(curve_counts.value_counts().to_dict()))
+        blocking = True
+    else:
+        _add("INFO", "forecast period count uniform", "PASS",
+             details=f"{curve_counts.iloc[0] if len(curve_counts) else 0} periods each")
+
+    # -- Numeric conversion ---
+    numeric_cols_ind = [COL_NPV10, COL_NPV_INVESTMENT_RATIO, COL_PAYOUT, COL_RESERVES,
+                        COL_FIRST_YEAR_RATE, COL_COST_OF_RESERVES, COL_IP30,
+                        COL_CAPEX, COL_ROR, COL_INITIAL_WI, COL_THREE_MONTH_RATE]
+    for c in numeric_cols_ind:
+        if c in indicators.columns:
+            converted = pd.to_numeric(indicators[c], errors="coerce")
+            new_nulls = converted.isna().sum() - indicators[c].isna().sum()
+            if new_nulls > 0:
+                _add("BLOCKING", f"indicators {c} numeric", "FAIL", int(new_nulls))
+                blocking = True
+
+    # -- Classification resolvability ---
+    def _classify_check(row):
+        c1 = pd.notna(row[COL_OLD_CURVE_1]) and str(row[COL_OLD_CURVE_1]).strip() != ""
+        c2 = pd.notna(row[COL_OLD_CURVE_2]) and str(row[COL_OLD_CURVE_2]).strip() != ""
+        if c1 and c2:
+            return "Consolidation"
+        elif c1 or c2:
+            return "Extension"
+        else:
+            return "Creation"
+
+    classifications = wells.apply(_classify_check, axis=1)
+    unresolved = classifications.isna().sum()
+    if unresolved > 0:
+        _add("BLOCKING", "event classification resolvable", "FAIL", int(unresolved))
+        blocking = True
+    else:
+        _add("INFO", "event classification resolvable", "PASS",
+             details=classifications.value_counts().to_dict().__str__())
+
+    # -- Nonblocking: UWI present but curve blank ---
+    for uwi_col, curve_col, label in [
+        (COL_OLD_UWI_1, COL_OLD_CURVE_1, "old well 1"),
+        (COL_OLD_UWI_2, COL_OLD_CURVE_2, "old well 2"),
+    ]:
+        mask_uwi = wells[uwi_col].notna() & (wells[uwi_col].astype(str).str.strip() != "")
+        mask_curve = wells[curve_col].isna() | (wells[curve_col].astype(str).str.strip() == "")
+        n = int((mask_uwi & mask_curve).sum())
+        if n > 0:
+            _add("WARNING", f"{label} UWI present but curve blank", "WARN", n,
+                 "Informational; classification uses type-curve columns only")
+
+        mask_curve2 = wells[curve_col].notna() & (wells[curve_col].astype(str).str.strip() != "")
+        mask_uwi2 = wells[uwi_col].isna() | (wells[uwi_col].astype(str).str.strip() == "")
+        n2 = int((mask_curve2 & mask_uwi2).sum())
+        if n2 > 0:
+            _add("WARNING", f"{label} curve present but UWI blank", "WARN", n2)
+
+    # -- Nonblocking: extra type curves ---
+    extra_ind = ind_curves - ref_curves
+    if extra_ind:
+        _add("WARNING", "extra type curves in indicators", "INFO", len(extra_ind),
+             str(extra_ind))
+    extra_fc = fc_curves - ref_curves
+    if extra_fc:
+        _add("WARNING", "extra type curves in forecasts", "INFO", len(extra_fc),
+             str(extra_fc))
+
+    report = pd.DataFrame(rows)
+
+    if blocking:
+        st.error("❌ Blocking validation errors found. See Data Quality page for details.")
+        for r in rows:
+            if r["severity"] == "BLOCKING" and r["status"] == "FAIL":
+                st.error(f"**{r['check']}**: {r['details']}")
+        st.dataframe(report)
+        st.stop()
+
+    return report
 
 
-def _entity_forecast(fc: pd.DataFrame, entity: str) -> pd.DataFrame:
-    """Get monthly forecast for a single entity."""
-    f = fc[fc["entity"] == entity]
-    if f.empty:
-        f = fc[fc["entity"].str.upper() == entity.upper()]
-    return f.sort_values("date").copy() if not f.empty else pd.DataFrame()
+# ════════════════════════════════════════════════════════════════════════════════
+# 4–5. DATA NORMALIZATION & EVENT CLASSIFICATION
+# ════════════════════════════════════════════════════════════════════════════════
+
+def classify_events(wells: pd.DataFrame) -> pd.DataFrame:
+    """Add event_type, event_story, old_curve_count, populated_old_curves columns."""
+    df = wells.copy()
+    df[COL_EVENT] = df[COL_EVENT].astype(int)
+
+    def _is_populated(val) -> bool:
+        return pd.notna(val) and str(val).strip() != ""
+
+    types, stories, old_counts, pop_curves = [], [], [], []
+    for _, row in df.iterrows():
+        c1 = _is_populated(row[COL_OLD_CURVE_1])
+        c2 = _is_populated(row[COL_OLD_CURVE_2])
+        if c1 and c2:
+            t = "Consolidation"
+            cnt = 2
+            curves = [row[COL_OLD_CURVE_1], row[COL_OLD_CURVE_2]]
+        elif c1 or c2:
+            t = "Extension"
+            cnt = 1
+            curves = [row[COL_OLD_CURVE_1]] if c1 else [row[COL_OLD_CURVE_2]]
+        else:
+            t = "Creation"
+            cnt = 0
+            curves = []
+        types.append(t)
+        stories.append(EVENT_TYPE_MAP[t])
+        old_counts.append(cnt)
+        pop_curves.append(curves)
+
+    df["event_type"] = types
+    df["event_story"] = stories
+    df["old_curve_count"] = old_counts
+    df["populated_old_curves"] = pop_curves
+    return df
 
 
-# ─── UI HELPERS ──────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════════
+# 6. FORECAST PREPARATION
+# ════════════════════════════════════════════════════════════════════════════════
 
-def header():
-    st.markdown(CSS, unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="app-header"><div class="t">{APP_TITLE}</div>'
-        f'<div class="s">{APP_SUBTITLE}</div></div>', unsafe_allow_html=True)
+def prepare_forecasts(forecasts: pd.DataFrame, ref_curves: set[str]) -> pd.DataFrame:
+    """Filter to referenced curves, add producing_month & dollar columns."""
+    df = forecasts[forecasts[COL_TYPE_CURVE].isin(ref_curves)].copy()
+    df = df.sort_values([COL_TYPE_CURVE, COL_FORECAST_YEAR, COL_FORECAST_MONTH]).reset_index(drop=True)
+    df["producing_month"] = df.groupby(COL_TYPE_CURVE).cumcount() + 1
 
+    for src, dst in [
+        (COL_FORECAST_REVENUE, "total_revenue_dollars"),
+        (COL_FORECAST_OPERATING_INCOME, "operating_income_dollars"),
+        (COL_FORECAST_CASH_FLOW, "cash_flow_dollars"),
+    ]:
+        df[dst] = pd.to_numeric(df[src], errors="coerce") * MONEY_TO_DOLLARS
 
-def section(n, title, note=""):
-    st.markdown(
-        f'<div class="sec"><span class="n">{n}</span><span class="h">{title}</span>'
-        f'<span class="d">{note}</span></div>', unsafe_allow_html=True)
+    for metric in ["total_revenue_dollars", "operating_income_dollars", "cash_flow_dollars"]:
+        cum_name = f"cumulative_{metric.replace('_dollars', '')}_dollars"
+        df[cum_name] = df.groupby(COL_TYPE_CURVE)[metric].cumsum()
 
-
-def callout(kind, html):
-    st.markdown(f'<div class="callout {kind}">{html}</div>', unsafe_allow_html=True)
-
-
-def kpi(label, value, delta=None, dir_=0, sub=None, tone=""):
-    dcls = "up" if dir_ > 0 else ("dn" if dir_ < 0 else "nt")
-    arrow = "▲ " if dir_ > 0 else ("▼ " if dir_ < 0 else "")
-    d = f'<div class="d {dcls}">{arrow}{delta}</div>' if delta else ""
-    s = f'<div class="s">{sub}</div>' if sub else ""
-    st.markdown(f'<div class="kpi {tone}"><div class="l">{label}</div>'
-                f'<div class="v">{value}</div>{d}{s}</div>', unsafe_allow_html=True)
+    return df
 
 
-def kpi_grid(cards, ncols=4):
-    for i in range(0, len(cards), ncols):
-        for col, c in zip(st.columns(ncols), cards[i:i + ncols]):
-            with col:
-                kpi(**c)
+def build_type_curve_lifetime(forecasts_clean: pd.DataFrame) -> pd.DataFrame:
+    """Lifetime sums by type curve."""
+    agg = forecasts_clean.groupby(COL_TYPE_CURVE).agg(
+        lifetime_revenue_dollars=("total_revenue_dollars", "sum"),
+        lifetime_operating_income_dollars=("operating_income_dollars", "sum"),
+        lifetime_cash_flow_dollars=("cash_flow_dollars", "sum"),
+        forecast_periods=("producing_month", "count"),
+    ).reset_index()
+    return agg
 
 
-def show_fig(fig, key=None):
-    st.plotly_chart(fig, use_container_width=True,
-                    config={"displaylogo": False}, key=key)
+# ════════════════════════════════════════════════════════════════════════════════
+# 7. INDICATOR PREPARATION
+# ════════════════════════════════════════════════════════════════════════════════
+
+def prepare_indicators(indicators: pd.DataFrame) -> pd.DataFrame:
+    """Add actual-dollar columns."""
+    df = indicators.copy()
+    df["npv10_dollars"] = pd.to_numeric(df[COL_NPV10], errors="coerce") * MONEY_TO_DOLLARS
+    df["investment_dollars"] = pd.to_numeric(df[COL_CAPEX], errors="coerce") * MONEY_TO_DOLLARS
+    return df
 
 
-def show_df(df, height=None):
-    kw = dict(hide_index=True, use_container_width=True)
-    if height:
-        kw["height"] = height
-    st.dataframe(df, **kw)
+# ════════════════════════════════════════════════════════════════════════════════
+# 8. PAYOUT HELPER
+# ════════════════════════════════════════════════════════════════════════════════
+
+def calculate_payout_years(monthly_cash_flow: pd.Series) -> float:
+    """Derive payout in years from a monthly cash-flow series (chronological)."""
+    cum = monthly_cash_flow.values.cumsum()
+    if len(cum) == 0:
+        return np.nan
+    if cum[0] >= 0:
+        return 0.0
+    for i in range(1, len(cum)):
+        if cum[i] >= 0:
+            prev = cum[i - 1]
+            month_cf = monthly_cash_flow.values[i]
+            if month_cf <= 0:
+                return np.nan
+            fraction = abs(prev) / month_cf
+            payout_months = i + fraction
+            return payout_months / 12.0
+    return np.nan
 
 
-def _dir(delta, good=1):
-    if _bad(delta) or abs(float(delta)) < 1e-12:
-        return 0
-    return int(np.sign(float(delta)) * good)
+# ════════════════════════════════════════════════════════════════════════════════
+# 9. EVENT-LEVEL ECONOMIC CALCULATIONS
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _safe_div(num: float, den: float) -> float:
+    if den == 0 or np.isnan(den) or np.isnan(num):
+        return np.nan
+    return num / den
 
 
-def _metric_card(key, before, after, label=None):
-    fmap = {k: f for k, _, f, _ in METRIC_DEFS}
-    gmap = {k: g for k, _, _, g in METRIC_DEFS}
-    lmap = {k: l for k, l, _, _ in METRIC_DEFS}
-    f = fmap.get(key, fmt_money)
-    g = gmap.get(key, 0)
-    lab = label or lmap.get(key, key)
-    d = (after - before) if not (_bad(after) or _bad(before)) else np.nan
-    return dict(label=lab, value=f(after),
-                delta=f"{f(d, signed=True)} vs before" if not _bad(d) else None,
-                dir_=_dir(d, g),
-                sub=f"Before {f(before)}",
-                tone="pos" if _dir(d, g) > 0 else ("neg" if _dir(d, g) < 0 else ""))
+@st.cache_data(show_spinner="Calculating event economics …")
+def build_event_economics(
+    wells_classified: pd.DataFrame,
+    indicators_clean: pd.DataFrame,
+    lifetime: pd.DataFrame,
+    forecasts_clean: pd.DataFrame,
+) -> pd.DataFrame:
+    """One row per event with old/new/delta financials."""
+    ind = indicators_clean.set_index(COL_TYPE_CURVE)
+    lt = lifetime.set_index(COL_TYPE_CURVE)
+
+    records: list[dict[str, Any]] = []
+
+    for _, row in wells_classified.iterrows():
+        ev: dict[str, Any] = {}
+        ev["event"] = int(row[COL_EVENT])
+        ev["event_type"] = row["event_type"]
+        ev["event_story"] = row["event_story"]
+        ev[COL_OLD_UWI_1] = row[COL_OLD_UWI_1] if pd.notna(row[COL_OLD_UWI_1]) else None
+        ev[COL_OLD_UWI_2] = row[COL_OLD_UWI_2] if pd.notna(row[COL_OLD_UWI_2]) else None
+        ev[COL_OLD_CURVE_1] = row[COL_OLD_CURVE_1] if pd.notna(row[COL_OLD_CURVE_1]) else None
+        ev[COL_OLD_CURVE_2] = row[COL_OLD_CURVE_2] if pd.notna(row[COL_OLD_CURVE_2]) else None
+        ev[COL_NEW_CURVE] = row[COL_NEW_CURVE]
+
+        old_curves: list[str] = row["populated_old_curves"]
+        new_curve: str = row[COL_NEW_CURVE]
+
+        # --- Old plan metrics ---
+        old_capex = sum(ind.loc[c, "investment_dollars"] for c in old_curves) if old_curves else 0.0
+        old_npv10 = sum(ind.loc[c, "npv10_dollars"] for c in old_curves) if old_curves else 0.0
+        old_reserves = sum(ind.loc[c, COL_RESERVES] for c in old_curves) if old_curves else 0.0
+        old_lt_rev = sum(lt.loc[c, "lifetime_revenue_dollars"] for c in old_curves) if old_curves else 0.0
+        old_lt_oi = sum(lt.loc[c, "lifetime_operating_income_dollars"] for c in old_curves) if old_curves else 0.0
+        old_lt_cf = sum(lt.loc[c, "lifetime_cash_flow_dollars"] for c in old_curves) if old_curves else 0.0
+        old_first_yr = sum(ind.loc[c, COL_FIRST_YEAR_RATE] for c in old_curves) if old_curves else 0.0
+        old_ip30 = sum(ind.loc[c, COL_IP30] for c in old_curves) if old_curves else 0.0
+        old_3mo = sum(ind.loc[c, COL_THREE_MONTH_RATE] for c in old_curves) if old_curves else 0.0
+
+        # --- New plan metrics ---
+        new_capex = ind.loc[new_curve, "investment_dollars"]
+        new_npv10 = ind.loc[new_curve, "npv10_dollars"]
+        new_reserves = ind.loc[new_curve, COL_RESERVES]
+        new_lt_rev = lt.loc[new_curve, "lifetime_revenue_dollars"]
+        new_lt_oi = lt.loc[new_curve, "lifetime_operating_income_dollars"]
+        new_lt_cf = lt.loc[new_curve, "lifetime_cash_flow_dollars"]
+        new_first_yr = ind.loc[new_curve, COL_FIRST_YEAR_RATE]
+        new_ip30 = ind.loc[new_curve, COL_IP30]
+        new_3mo = ind.loc[new_curve, COL_THREE_MONTH_RATE]
+        new_payout_source = ind.loc[new_curve, COL_PAYOUT]
+        new_ror = ind.loc[new_curve, COL_ROR]
+        new_npv_inv_ratio = ind.loc[new_curve, COL_NPV_INVESTMENT_RATIO]
+        new_cor = ind.loc[new_curve, COL_COST_OF_RESERVES]
+        new_wi = ind.loc[new_curve, COL_INITIAL_WI]
+
+        # Old-plan payout from combined cash flow
+        if old_curves:
+            old_fc_list = []
+            for c in old_curves:
+                fc = forecasts_clean[forecasts_clean[COL_TYPE_CURVE] == c].sort_values("producing_month")
+                old_fc_list.append(fc[["producing_month", "cash_flow_dollars"]].set_index("producing_month"))
+            combined_old_cf = pd.concat(old_fc_list, axis=1).sum(axis=1).sort_index()
+            old_payout = calculate_payout_years(combined_old_cf)
+        else:
+            old_payout = np.nan
+
+        # New-plan payout (derived)
+        new_fc = forecasts_clean[forecasts_clean[COL_TYPE_CURVE] == new_curve].sort_values("producing_month")
+        new_payout_derived = calculate_payout_years(new_fc["cash_flow_dollars"])
+
+        # Deltas
+        ev["old_capex_dollars"] = old_capex
+        ev["new_capex_dollars"] = new_capex
+        ev["capex_delta_dollars"] = new_capex - old_capex
+
+        ev["old_npv10_dollars"] = old_npv10
+        ev["new_npv10_dollars"] = new_npv10
+        ev["npv10_delta_dollars"] = new_npv10 - old_npv10
+
+        ev["old_reserves_boe"] = old_reserves
+        ev["new_reserves_boe"] = new_reserves
+        ev["reserves_delta_boe"] = new_reserves - old_reserves
+
+        ev["old_lifetime_revenue_dollars"] = old_lt_rev
+        ev["new_lifetime_revenue_dollars"] = new_lt_rev
+        ev["revenue_delta_dollars"] = new_lt_rev - old_lt_rev
+
+        ev["old_lifetime_operating_income_dollars"] = old_lt_oi
+        ev["new_lifetime_operating_income_dollars"] = new_lt_oi
+        ev["operating_income_delta_dollars"] = new_lt_oi - old_lt_oi
+
+        ev["old_lifetime_cash_flow_dollars"] = old_lt_cf
+        ev["new_lifetime_cash_flow_dollars"] = new_lt_cf
+        ev["cash_flow_delta_dollars"] = new_lt_cf - old_lt_cf
+
+        ev["old_first_year_rate_boepd"] = old_first_yr
+        ev["new_first_year_rate_boepd"] = new_first_yr
+        ev["old_ip30_boe"] = old_ip30
+        ev["new_ip30_boe"] = new_ip30
+        ev["old_3mo_rate_boepd"] = old_3mo
+        ev["new_3mo_rate_boepd"] = new_3mo
+
+        ev["old_payout_years"] = old_payout
+        ev["new_payout_source"] = new_payout_source
+        ev["new_payout_derived"] = new_payout_derived
+
+        ev["new_ror_pct"] = new_ror
+        ev["new_npv_inv_ratio"] = new_npv_inv_ratio
+        ev["new_cost_of_reserves"] = new_cor
+        ev["new_initial_wi_pct"] = new_wi
+
+        # Derived efficiency metrics
+        ev["old_cost_of_reserves"] = _safe_div(old_capex, old_reserves)
+        ev["new_cost_of_reserves_derived"] = _safe_div(new_capex, new_reserves)
+        ev["cost_of_reserves_delta"] = (
+            _safe_div(new_capex, new_reserves) - _safe_div(old_capex, old_reserves)
+            if old_reserves > 0 else np.nan
+        )
+        ev["old_npv_inv_ratio_derived"] = _safe_div(old_npv10, old_capex)
+        ev["new_npv_inv_ratio_derived"] = _safe_div(new_npv10, new_capex)
+        ev["old_lifetime_oi_per_boe"] = _safe_div(old_lt_oi, old_reserves)
+        ev["new_lifetime_oi_per_boe"] = _safe_div(new_lt_oi, new_reserves)
+        ev["old_npv10_per_boe"] = _safe_div(old_npv10, old_reserves)
+        ev["new_npv10_per_boe"] = _safe_div(new_npv10, new_reserves)
+
+        # Extension-specific marginal metrics
+        inc_cap = new_capex - old_capex
+        inc_npv = new_npv10 - old_npv10
+        inc_res = new_reserves - old_reserves
+        ev["marginal_npv_to_inc_capital"] = _safe_div(inc_npv, inc_cap) if inc_cap > 0 else np.nan
+        ev["inc_capital_per_inc_boe"] = _safe_div(inc_cap, inc_res) if inc_res > 0 else np.nan
+        ev["inc_npv_per_inc_boe"] = _safe_div(inc_npv, inc_res) if inc_res > 0 else np.nan
+
+        ev["old_type_curves_used"] = " | ".join(old_curves) if old_curves else ""
+        ev["new_type_curve_used"] = new_curve
+
+        records.append(ev)
+
+    return pd.DataFrame(records)
 
 
-# ─── CHARTS ──────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════════
+# 10. EVENT FORECAST SERIES
+# ════════════════════════════════════════════════════════════════════════════════
 
-def _fin(fig, title, h=420, ytitle="", tickpre=""):
-    fig.update_layout(title=title, height=h, yaxis_title=ytitle,
-                      bargap=0.28, hovermode="x unified")
-    if tickpre:
-        fig.update_yaxes(tickprefix=tickpre)
+@st.cache_data(show_spinner="Building event forecasts …")
+def build_event_forecasts(
+    wells_classified: pd.DataFrame,
+    forecasts_clean: pd.DataFrame,
+) -> pd.DataFrame:
+    """Long-form event forecast table."""
+    all_series: list[pd.DataFrame] = []
+
+    for _, row in wells_classified.iterrows():
+        ev_num = int(row[COL_EVENT])
+        ev_type = row["event_type"]
+        ev_story = row["event_story"]
+        old_curves: list[str] = row["populated_old_curves"]
+        new_curve: str = row[COL_NEW_CURVE]
+
+        base_cols = ["producing_month", COL_FORECAST_YEAR, COL_FORECAST_MONTH,
+                     "total_revenue_dollars", "operating_income_dollars", "cash_flow_dollars"]
+
+        if ev_type == "Consolidation":
+            dfs_old = []
+            for idx, c in enumerate(old_curves, 1):
+                fc = forecasts_clean[forecasts_clean[COL_TYPE_CURVE] == c].sort_values("producing_month")[base_cols].copy()
+                fc["series_key"] = f"old_{idx}"
+                fc["series_label"] = f"Old Well {idx}: {c}"
+                fc["plan_side"] = "old"
+                dfs_old.append(fc)
+            # Combined old
+            if len(dfs_old) == 2:
+                comb = dfs_old[0][base_cols].copy().set_index("producing_month")
+                comb2 = dfs_old[1][base_cols].copy().set_index("producing_month")
+                combined = comb.copy()
+                for mc in ["total_revenue_dollars", "operating_income_dollars", "cash_flow_dollars"]:
+                    combined[mc] = comb[mc].values + comb2[mc].values
+                combined = combined.reset_index()
+                combined["series_key"] = "combined_old"
+                combined["series_label"] = "Combined Old Plan"
+                combined["plan_side"] = "old"
+                dfs_old.append(combined)
+            for d in dfs_old:
+                d["event"] = ev_num
+                d["event_type"] = ev_type
+                d["event_story"] = ev_story
+            all_series.extend(dfs_old)
+
+        elif ev_type == "Extension":
+            c = old_curves[0]
+            fc = forecasts_clean[forecasts_clean[COL_TYPE_CURVE] == c].sort_values("producing_month")[base_cols].copy()
+            fc["series_key"] = "old_ref"
+            fc["series_label"] = f"One-Mile Reference: {c}"
+            fc["plan_side"] = "old"
+            fc["event"] = ev_num
+            fc["event_type"] = ev_type
+            fc["event_story"] = ev_story
+            all_series.append(fc)
+
+        # New curve (all types)
+        fc_new = forecasts_clean[forecasts_clean[COL_TYPE_CURVE] == new_curve].sort_values("producing_month")[base_cols].copy()
+        if ev_type == "Consolidation":
+            fc_new["series_key"] = "new_plan"
+            fc_new["series_label"] = f"New Two-Mile Plan: {new_curve}"
+        elif ev_type == "Extension":
+            fc_new["series_key"] = "new_opp"
+            fc_new["series_label"] = f"Two-Mile Opportunity: {new_curve}"
+        else:
+            fc_new["series_key"] = "new_inventory"
+            fc_new["series_label"] = f"New Inventory Opportunity: {new_curve}"
+        fc_new["plan_side"] = "new"
+        fc_new["event"] = ev_num
+        fc_new["event_type"] = ev_type
+        fc_new["event_story"] = ev_story
+        all_series.append(fc_new)
+
+    if not all_series:
+        return pd.DataFrame()
+
+    result = pd.concat(all_series, ignore_index=True)
+
+    # Add cumulative columns per event+series
+    for metric in ["total_revenue_dollars", "operating_income_dollars", "cash_flow_dollars"]:
+        cum_name = f"cumulative_{metric.replace('_dollars', '')}_dollars"
+        result[cum_name] = result.groupby(["event", "series_key"])[metric].cumsum()
+
+    return result
+
+
+def build_event_annual_forecasts(event_forecasts: pd.DataFrame) -> pd.DataFrame:
+    """Annual aggregation of event forecasts."""
+    if event_forecasts.empty:
+        return pd.DataFrame()
+    group_cols = ["event", "event_type", "event_story", "series_key", "series_label", "plan_side", COL_FORECAST_YEAR]
+    agg = event_forecasts.groupby(group_cols, as_index=False).agg(
+        total_revenue_dollars=("total_revenue_dollars", "sum"),
+        operating_income_dollars=("operating_income_dollars", "sum"),
+        cash_flow_dollars=("cash_flow_dollars", "sum"),
+    )
+    return agg
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 11. EXECUTIVE SUMMARY
+# ════════════════════════════════════════════════════════════════════════════════
+
+def build_executive_summary(econ: pd.DataFrame) -> pd.DataFrame:
+    """One-row-per-category + combined total."""
+    rows = []
+    for et in ["Consolidation", "Extension", "Creation"]:
+        sub = econ[econ["event_type"] == et]
+        r: dict[str, Any] = {"category": et, "event_story": EVENT_TYPE_MAP[et], "events": len(sub)}
+        if et == "Consolidation":
+            r["primary_value_dollars"] = sub["npv10_delta_dollars"].sum()
+            r["capital_dollars"] = sub["capex_delta_dollars"].sum()
+            r["reserves_boe"] = sub["reserves_delta_boe"].sum()
+        elif et == "Extension":
+            r["primary_value_dollars"] = sub["npv10_delta_dollars"].sum()
+            r["capital_dollars"] = sub["capex_delta_dollars"].sum()
+            r["reserves_boe"] = sub["reserves_delta_boe"].sum()
+        else:
+            r["primary_value_dollars"] = sub["new_npv10_dollars"].sum()
+            r["capital_dollars"] = sub["new_capex_dollars"].sum()
+            r["reserves_boe"] = sub["new_reserves_boe"].sum()
+        rows.append(r)
+
+    total = {
+        "category": "Combined",
+        "event_story": "Total Review Impact",
+        "events": sum(r["events"] for r in rows),
+        "primary_value_dollars": sum(r["primary_value_dollars"] for r in rows),
+        "capital_dollars": sum(r["capital_dollars"] for r in rows),
+        "reserves_boe": sum(r["reserves_boe"] for r in rows),
+    }
+    rows.append(total)
+    return pd.DataFrame(rows)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 12. FORMATTING HELPERS
+# ════════════════════════════════════════════════════════════════════════════════
+
+def fmt_mm(val: float | None, prefix: str = "$", suffix: str = " MM") -> str:
+    """Format actual dollars as $X.X MM."""
+    if val is None or np.isnan(val):
+        return "N/A"
+    mm = val / 1_000_000
+    if mm < 0:
+        return f"({prefix}{abs(mm):,.1f}{suffix})"
+    return f"{prefix}{mm:,.1f}{suffix}"
+
+
+def fmt_mboe(val: float | None) -> str:
+    if val is None or np.isnan(val):
+        return "N/A"
+    return f"{val / 1_000:,.1f} Mboe"
+
+
+def fmt_pct(val: float | None) -> str:
+    if val is None or np.isnan(val):
+        return "N/A"
+    return f"{val:,.1f}%"
+
+
+def fmt_ratio(val: float | None) -> str:
+    if val is None or np.isnan(val):
+        return "N/M"
+    return f"{val:,.2f}x"
+
+
+def fmt_dollarboe(val: float | None) -> str:
+    if val is None or np.isnan(val):
+        return "N/A"
+    return f"${val:,.2f}/boe"
+
+
+def fmt_years(val: float | None) -> str:
+    if val is None or np.isnan(val):
+        return "No payout"
+    return f"{val:,.2f} years"
+
+
+def fmt_rate(val: float | None) -> str:
+    if val is None or np.isnan(val):
+        return "N/A"
+    return f"{val:,.0f} boe/d"
+
+
+def fmt_boe(val: float | None) -> str:
+    if val is None or np.isnan(val):
+        return "N/A"
+    return f"{val:,.0f} boe"
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 13. DOWNLOAD HELPERS
+# ════════════════════════════════════════════════════════════════════════════════
+
+def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+
+def dataframes_to_excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for name, df in sheets.items():
+            sheet_name = name[:31]
+            df.to_excel(writer, sheet_name=sheet_name, index=False, freeze_panes=(1, 0))
+    buf.seek(0)
+    return buf.read()
+
+
+def plotly_to_html_bytes(fig: go.Figure) -> bytes:
+    return fig.to_html(include_plotlyjs="cdn").encode("utf-8")
+
+
+def plotly_to_image_bytes(fig: go.Figure, fmt: str = "png") -> bytes | None:
+    try:
+        return fig.to_image(format=fmt, width=1200, height=600, scale=2)
+    except Exception:
+        return None
+
+
+def build_zip_bytes(files: dict[str, bytes]) -> bytes:
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in files.items():
+            zf.writestr(name, data)
+    buf.seek(0)
+    return buf.read()
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 14. CHART HELPERS
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _base_layout(fig: go.Figure, title: str, xaxis: str = "", yaxis: str = ""):
+    fig.update_layout(
+        title=title,
+        xaxis_title=xaxis,
+        yaxis_title=yaxis,
+        template="plotly_white",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.3),
+        margin=dict(l=60, r=30, t=50, b=40),
+    )
     return fig
 
 
-def chart_case_bars(case_agg, key, title):
-    fmap = {k: f for k, _, f, _ in METRIC_DEFS}
-    fmt_fn = fmap.get(key, fmt_money)
-    cases = [c for c in CASE_ORDER if c in case_agg]
-    bv = [case_agg[c][f"before_{key}"] for c in cases]
-    av = [case_agg[c][f"after_{key}"] for c in cases]
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=cases, y=bv, name="Before", marker_color=CLR["before"],
-                         text=[fmt_fn(v) for v in bv], textposition="outside", textfont_size=10))
-    fig.add_trace(go.Bar(x=cases, y=av, name="After", marker_color=CLR["after"],
-                         text=[fmt_fn(v) for v in av], textposition="outside", textfont_size=10))
-    fig.update_layout(barmode="group")
-    return _fin(fig, title, 400)
+# ════════════════════════════════════════════════════════════════════════════════
+# PAGE RENDERERS
+# ════════════════════════════════════════════════════════════════════════════════
 
+def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, event_forecasts: pd.DataFrame):
+    st.header("Viewfield Bakken Exploitation Review")
+    st.caption("Development-plan optimization and inventory opportunities identified")
 
-def chart_monthly(panel, val, title, show=("before", "after")):
-    fig = go.Figure()
-    style = {"before": (CLR["before"], "dash", "Before"),
-             "after": (CLR["after"], "solid", "After"),
-             "incr": (CLR["incr"], "solid", "Incremental")}
-    for pre in show:
-        c, dash, nm = style[pre]
-        col = f"{pre}_{val}"
-        if col not in panel.columns:
-            continue
-        fig.add_trace(go.Scatter(
-            x=panel["date"], y=panel[col], name=nm, mode="lines",
-            line=dict(color=c, width=2.4, dash=dash),
-            fill="tozeroy" if pre == "incr" else None,
-            fillcolor="rgba(14,154,167,.14)" if pre == "incr" else None))
-    fig.add_hline(y=0, line_color=CLR["slate"], line_width=1)
-    return _fin(fig, title, 400, "$", tickpre="$")
+    consol = econ[econ["event_type"] == "Consolidation"]
+    ext = econ[econ["event_type"] == "Extension"]
+    cre = econ[econ["event_type"] == "Creation"]
 
+    total_val = (
+        consol["npv10_delta_dollars"].sum()
+        + ext["npv10_delta_dollars"].sum()
+        + cre["new_npv10_dollars"].sum()
+    )
+    total_cap = (
+        consol["capex_delta_dollars"].sum()
+        + ext["capex_delta_dollars"].sum()
+        + cre["new_capex_dollars"].sum()
+    )
 
-def chart_incremental_bars(panel, val, title):
-    y = panel[f"incr_{val}"]
-    fig = go.Figure(go.Bar(
-        x=panel["date"], y=y,
-        marker_color=np.where(y >= 0, CLR["green"], CLR["red"])))
-    fig.add_trace(go.Scatter(x=panel["date"], y=panel[f"cum_incr_{val}"],
-                             name="Cumulative", yaxis="y2", mode="lines",
-                             line=dict(color=CLR["navy"], width=2.4)))
-    fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False,
-                                  tickprefix="$", title="Cumulative"))
-    return _fin(fig, title, 420, "$ / month", tickpre="$")
+    # --- Section A: Overall Review ---
+    st.subheader("Overall Review")
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Total Events Reviewed", f"{len(econ):,}")
+    c2.metric("Existing Plan Optimizations", f"{len(consol):,}")
+    c3.metric("Inventory Enhancements", f"{len(ext):,}")
+    c4.metric("New Inventory Locations", f"{len(cre):,}")
+    c5.metric("Total Review Value", fmt_mm(total_val))
+    c6.metric("Total Review Capital", fmt_mm(total_cap))
+    st.caption("Total Review Value = Consolidation NPV uplift + Extension incremental NPV uplift + Creation gross NPV.")
 
+    # --- Section B: Existing Plan Optimization ---
+    st.subheader("Existing Plan Optimization (Consolidations)")
+    cb1, cb2, cb3, cb4 = st.columns(4)
+    cb1.metric("Consolidation Events", f"{len(consol):,}")
+    cb2.metric("One-Mile Locations Replaced", f"{2 * len(consol):,}")
+    cb3.metric("Two-Mile Locations", f"{len(consol):,}")
+    cb4.metric("Net Location Reduction", f"{len(consol):,}")
 
-def chart_entity_cf(fc: pd.DataFrame, entities: dict[str, str], title: str) -> go.Figure:
-    """One line per entity on the same chart. entities = {entity_name: display_label}."""
-    palette = [CLR["navy"], CLR["blue"], CLR["teal"], CLR["amber"], CLR["green"],
-               CLR["red"], CLR["slate"]]
-    fig = go.Figure()
-    for i, (ent, label) in enumerate(entities.items()):
-        ef = fc[fc["entity"] == ent]
-        if ef.empty:
-            ef = fc[fc["entity"].str.upper() == ent.upper()]
-        if ef.empty:
-            continue
-        ef = ef.sort_values("date")
-        fig.add_trace(go.Scatter(
-            x=ef["date"], y=ef["cf"], name=label, mode="lines",
-            line=dict(color=palette[i % len(palette)], width=2.2)))
-    fig.add_hline(y=0, line_color=CLR["slate"], line_width=1)
-    return _fin(fig, title, 420, "$", tickpre="$")
+    cd1, cd2, cd3, cd4 = st.columns(4)
+    cd1.metric("NPV10 Uplift", fmt_mm(consol["npv10_delta_dollars"].sum()))
+    cap_delta_sum = consol["capex_delta_dollars"].sum()
+    cap_label = "Capital Reduction" if cap_delta_sum < 0 else "Incremental Capital"
+    cd2.metric(cap_label, fmt_mm(cap_delta_sum))
+    cd3.metric("Reserves Change", fmt_mboe(consol["reserves_delta_boe"].sum()))
+    cd4.metric("OI Change", fmt_mm(consol["operating_income_delta_dollars"].sum()))
 
+    # Charts
+    col_l, col_r = st.columns(2)
+    with col_l:
+        if len(consol) > 0:
+            df_ranked = consol.sort_values("npv10_delta_dollars", ascending=False).copy()
+            df_ranked["event_label"] = df_ranked["event"].astype(str)
+            df_ranked["color"] = df_ranked["npv10_delta_dollars"].apply(lambda x: COLOR_POSITIVE if x >= 0 else COLOR_NEGATIVE)
+            fig = go.Figure(go.Bar(
+                x=df_ranked["event_label"],
+                y=df_ranked["npv10_delta_dollars"] / 1e6,
+                marker_color=df_ranked["color"],
+                hovertemplate="Event %{x}<br>NPV Uplift: $%{y:.2f} MM<extra></extra>"
+            ))
+            _base_layout(fig, "Consolidation NPV10 Uplift by Event", "Event #", "NPV10 Uplift ($MM)")
+            fig.add_hline(y=0, line_dash="dash", line_color="gray")
+            st.plotly_chart(fig, use_container_width=True)
 
-def chart_migration(ev):
-    d = ev.dropna(subset=["before_invest", "before_npv", "after_invest", "after_npv"])
-    fig = go.Figure()
-    xs, ys = [], []
-    for r in d.itertuples():
-        xs += [r.before_invest, r.after_invest, None]
-        ys += [r.before_npv, r.after_npv, None]
-    if xs:
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", showlegend=False,
-                                 line=dict(color=CLR["light"], width=1.2), hoverinfo="skip"))
-    fig.add_trace(go.Scatter(
-        x=d["before_invest"], y=d["before_npv"], mode="markers", name="Before",
-        marker=dict(size=9, color=CLR["before"], symbol="circle-open", line_width=2),
-        text=d["event_id"],
-        hovertemplate="<b>%{text}</b><br>Inv %{x:$,.0f} · NPV %{y:$,.0f}<extra>Before</extra>"))
-    fig.add_trace(go.Scatter(
-        x=d["after_invest"], y=d["after_npv"], mode="markers", name="After",
-        marker=dict(size=11, color=[CASE_CLR.get(c, CLR["slate"]) for c in d["case"]],
-                    line=dict(color="#FFF", width=1)),
-        text=d["event_id"],
-        hovertemplate="<b>%{text}</b><br>Inv %{x:$,.0f} · NPV %{y:$,.0f}<extra>After</extra>"))
-    fig.update_xaxes(tickprefix="$", title="Investment")
-    return _fin(fig, "Investment vs NPV Migration", 480, "NPV", tickpre="$")
+    with col_r:
+        if len(consol) > 0:
+            fig2 = px.scatter(
+                consol, x=consol["capex_delta_dollars"] / 1e6,
+                y=consol["npv10_delta_dollars"] / 1e6,
+                size=consol["new_reserves_boe"].clip(lower=1),
+                hover_data={"event": True},
+                labels={"x": "Capital Delta ($MM)", "y": "NPV10 Delta ($MM)"},
+            )
+            _base_layout(fig2, "Capital vs NPV Delta (Consolidations)", "Capital Delta ($MM)", "NPV10 Delta ($MM)")
+            fig2.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig2.add_vline(x=0, line_dash="dash", line_color="gray")
+            st.plotly_chart(fig2, use_container_width=True)
 
+    # --- Section C: Inventory Enhancements ---
+    st.subheader("Inventory Enhancements Identified (Extensions)")
+    if len(ext) > 0:
+        ce1, ce2, ce3, ce4, ce5 = st.columns(5)
+        ce1.metric("Extension Opportunities", f"{len(ext):,}")
+        ce2.metric("Incremental Capital", fmt_mm(ext["capex_delta_dollars"].sum()))
+        ce3.metric("Incremental NPV10", fmt_mm(ext["npv10_delta_dollars"].sum()))
+        ce4.metric("Incremental Reserves", fmt_mboe(ext["reserves_delta_boe"].sum()))
+        valid_marginal = ext[ext["marginal_npv_to_inc_capital"].notna()]
+        if len(valid_marginal) > 0:
+            weighted = ext["npv10_delta_dollars"].sum() / ext["capex_delta_dollars"].sum() if ext["capex_delta_dollars"].sum() != 0 else np.nan
+            ce5.metric("Portfolio Marginal NPV/Cap", fmt_ratio(weighted))
+        else:
+            ce5.metric("Portfolio Marginal NPV/Cap", "N/M")
 
-# ─── PAGES ───────────────────────────────────────────────────────────────────
+        fig_ext = go.Figure(go.Bar(
+            x=ext.sort_values("npv10_delta_dollars", ascending=False)["event"].astype(str),
+            y=ext.sort_values("npv10_delta_dollars", ascending=False)["npv10_delta_dollars"] / 1e6,
+            marker_color=COLOR_EXTENSION,
+        ))
+        _base_layout(fig_ext, "Incremental NPV10 by Extension Event", "Event #", "Incremental NPV10 ($MM)")
+        fig_ext.add_hline(y=0, line_dash="dash", line_color="gray")
+        st.plotly_chart(fig_ext, use_container_width=True)
+    else:
+        st.info("No extension events.")
 
-def page_summary(ev, port, case_agg, consol, fc, panel):
-    section("01", "Headline",
-            f"{len(ev):,} events · "
-            + " / ".join(f"{c[:5]} {int((ev.case == c).sum())}"
-                         for c in CASE_ORDER if (ev.case == c).any()))
+    # --- Section D: New Inventory ---
+    st.subheader("New Inventory Identified (Creations)")
+    if len(cre) > 0:
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        cc1.metric("New Locations Identified", f"{len(cre):,}")
+        cc2.metric("New Inventory Capital", fmt_mm(cre["new_capex_dollars"].sum()))
+        cc3.metric("New Inventory NPV10", fmt_mm(cre["new_npv10_dollars"].sum()))
+        cc4.metric("New Inventory Reserves", fmt_mboe(cre["new_reserves_boe"].sum()))
 
-    vc = port["delta_npv"]
-    inv_saved = port["invest_saved"]
-    eff_b, eff_a = port["before_npv_inv"], port["after_npv_inv"]
+        fig_cre = go.Figure(go.Bar(
+            x=cre.sort_values("new_npv10_dollars", ascending=False)["event"].astype(str),
+            y=cre.sort_values("new_npv10_dollars", ascending=False)["new_npv10_dollars"] / 1e6,
+            marker_color=COLOR_CREATION,
+        ))
+        _base_layout(fig_cre, "New Inventory NPV10 by Event", "Event #", "NPV10 ($MM)")
+        st.plotly_chart(fig_cre, use_container_width=True)
+    else:
+        st.info("No creation events.")
 
-    verdict = "good" if not _bad(vc) and vc > 0 else (
-        "bad" if not _bad(vc) and vc < 0 else "info")
-    bits = [
-        f"Inventory moves from <b>{fmt_int(port['wells_before'])}</b> wells to "
-        f"<b>{fmt_int(port['wells_after'])}</b> "
-        f"(<b>{fmt_int(port['wells_net'], signed=True)}</b> net)",
-        f"portfolio NPV changes by <b>{fmt_money(vc, signed=True)}</b>",
+    # --- Section E: Value Bridge ---
+    st.subheader("Review Value Bridge")
+    bridge_labels = ["Existing Plan\nOptimization", "Inventory\nEnhancement", "New\nInventory", "Total Review\nValue"]
+    bridge_values = [
+        consol["npv10_delta_dollars"].sum() / 1e6,
+        ext["npv10_delta_dollars"].sum() / 1e6,
+        cre["new_npv10_dollars"].sum() / 1e6,
     ]
-    if not _bad(inv_saved):
-        bits.append(f"{'releases' if inv_saved > 0 else 'consumes'} "
-                    f"<b>{fmt_money(abs(inv_saved))}</b> of investment")
-    if not _bad(eff_a) and not _bad(eff_b):
-        bits.append(f"capital efficiency: <b>{fmt_ratio(eff_b)}</b> → <b>{fmt_ratio(eff_a)}</b>")
-    callout(verdict, " · ".join(bits) + ".")
+    bridge_values.append(sum(bridge_values))
 
-    kpi_grid([
-        dict(label="Events", value=fmt_int(len(ev)), tone="acc"),
-        dict(label="Before Wells", value=fmt_int(port["wells_before"])),
-        dict(label="After Wells", value=fmt_int(port["wells_after"])),
-        dict(label="Net Wells", value=fmt_int(port["wells_net"], signed=True)),
-    ], 4)
-    st.write("")
-    kpi_grid([
-        dict(label="NPV Before", value=fmt_money(port["before_npv"])),
-        dict(label="NPV After", value=fmt_money(port["after_npv"]), tone="acc"),
-        dict(label="Value Created", value=fmt_money(vc, signed=True),
-             dir_=_dir(vc, 1), tone="pos" if _dir(vc, 1) > 0 else "neg"),
-        dict(label="NPV/Investment", value=fmt_ratio(eff_a),
-             delta=(f"{fmt_ratio(eff_a - eff_b, signed=True)} vs before"
-                    if not (_bad(eff_a) or _bad(eff_b)) else None),
-             dir_=_dir(eff_a - eff_b if not (_bad(eff_a) or _bad(eff_b)) else np.nan, 1),
-             sub=f"Before {fmt_ratio(eff_b)}", tone="acc"),
-    ], 4)
-    st.write("")
-    kpi_grid([
-        dict(label="Investment Before → After",
-             value=f"{fmt_money(port['before_invest'])} → {fmt_money(port['after_invest'])}"),
-        dict(label="Investment Saved", value=fmt_money(inv_saved, signed=True),
-             dir_=_dir(inv_saved, 1),
-             tone="pos" if _dir(inv_saved, 1) > 0 else "neg"),
-        dict(label="Reserves After", value=fmt_vol(port["after_boe"]),
-             delta=fmt_vol(port["delta_boe"], signed=True),
-             dir_=_dir(port["delta_boe"], 1)),
-        dict(label="1st-Year Rate After", value=fmt_rate(port["after_fy_rate"]),
-             delta=fmt_rate(port["delta_fy_rate"], signed=True),
-             dir_=_dir(port["delta_fy_rate"], 1)),
-    ], 4)
+    fig_bridge = go.Figure(go.Waterfall(
+        x=bridge_labels,
+        y=bridge_values,
+        measure=["relative", "relative", "relative", "total"],
+        text=[f"${v:,.1f} MM" for v in bridge_values],
+        textposition="outside",
+        connector=dict(line=dict(color="gray", width=1)),
+        increasing=dict(marker=dict(color=COLOR_POSITIVE)),
+        decreasing=dict(marker=dict(color=COLOR_NEGATIVE)),
+        totals=dict(marker=dict(color=COLOR_NEW)),
+    ))
+    _base_layout(fig_bridge, "Total Review Value Bridge", "", "NPV10 ($MM)")
+    st.plotly_chart(fig_bridge, use_container_width=True)
 
-    section("02", "Cash-Flow Trajectory", "Portfolio, undiscounted")
-    if not panel.empty:
-        c1, c2 = st.columns(2)
-        with c1:
-            show_fig(chart_monthly(panel, "cf", "Monthly Cash Flow — Before vs After"),
-                     "sum_mcf")
-        with c2:
-            fig = go.Figure()
-            for pre, col, nm, dash in (("before", CLR["before"], "Before", "dash"),
-                                       ("after", CLR["after"], "After", "solid"),
-                                       ("incr", CLR["incr"], "Incremental", "solid")):
-                fig.add_trace(go.Scatter(
-                    x=panel["date"], y=panel[f"cum_{pre}_cf"],
-                    name=nm, mode="lines",
-                    line=dict(color=col, width=2.4, dash=dash)))
-            fig.add_hline(y=0, line_color=CLR["slate"], line_width=1)
-            show_fig(_fin(fig, "Cumulative Cash Flow", 400, "$", tickpre="$"), "sum_ccf")
+
+def render_existing_plan_optimization(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
+    st.header("Existing Plan Optimization: One-Mile to Two-Mile Consolidations")
+
+    consol = econ[econ["event_type"] == "Consolidation"].copy()
+
+    if len(consol) == 0:
+        st.info("No consolidation events found.")
+        return
+
+    # Filters
+    with st.expander("Filters", expanded=False):
+        fc1, fc2, fc3 = st.columns(3)
+        new_curves_avail = sorted(consol[COL_NEW_CURVE].unique())
+        sel_new_curve = fc1.multiselect("New Type Curve", new_curves_avail, default=new_curves_avail, key="opt_nc")
+        npv_dir = fc2.radio("NPV Uplift Direction", ["All", "Positive", "Negative"], key="opt_npv_dir")
+        cap_dir = fc3.radio("Capital Direction", ["All", "Reduction", "Increase"], key="opt_cap_dir")
+
+    mask = consol[COL_NEW_CURVE].isin(sel_new_curve)
+    if npv_dir == "Positive":
+        mask &= consol["npv10_delta_dollars"] >= 0
+    elif npv_dir == "Negative":
+        mask &= consol["npv10_delta_dollars"] < 0
+    if cap_dir == "Reduction":
+        mask &= consol["capex_delta_dollars"] < 0
+    elif cap_dir == "Increase":
+        mask &= consol["capex_delta_dollars"] >= 0
+    filtered = consol[mask]
+
+    # Summary metrics
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1.metric("Events", f"{len(filtered):,}")
+    mc2.metric("Old Plan Capital", fmt_mm(filtered["old_capex_dollars"].sum()))
+    mc3.metric("New Plan Capital", fmt_mm(filtered["new_capex_dollars"].sum()))
+    mc4.metric("Capital Delta", fmt_mm(filtered["capex_delta_dollars"].sum()))
+    mc5.metric("NPV10 Uplift", fmt_mm(filtered["npv10_delta_dollars"].sum()))
+
+    mc6, mc7, mc8, mc9, mc10 = st.columns(5)
+    mc6.metric("Old Plan NPV10", fmt_mm(filtered["old_npv10_dollars"].sum()))
+    mc7.metric("New Plan NPV10", fmt_mm(filtered["new_npv10_dollars"].sum()))
+    mc8.metric("Old Reserves", fmt_mboe(filtered["old_reserves_boe"].sum()))
+    mc9.metric("New Reserves", fmt_mboe(filtered["new_reserves_boe"].sum()))
+    mc10.metric("Reserves Delta", fmt_mboe(filtered["reserves_delta_boe"].sum()))
+
+    # Charts
+    col_l, col_r = st.columns(2)
+    with col_l:
+        df_r = filtered.sort_values("npv10_delta_dollars", ascending=False)
+        colors = [COLOR_POSITIVE if v >= 0 else COLOR_NEGATIVE for v in df_r["npv10_delta_dollars"]]
+        fig = go.Figure(go.Bar(
+            x=df_r["event"].astype(str), y=df_r["npv10_delta_dollars"] / 1e6,
+            marker_color=colors,
+            hovertemplate="Event %{x}<br>NPV Uplift: $%{y:.2f} MM<extra></extra>",
+        ))
+        _base_layout(fig, "NPV10 Uplift by Event", "Event #", "NPV10 Uplift ($MM)")
+        fig.add_hline(y=0, line_dash="dash", line_color="gray")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_r:
+        df_r2 = filtered.sort_values("capex_delta_dollars", ascending=True)
+        colors2 = [COLOR_POSITIVE if v < 0 else COLOR_NEGATIVE for v in df_r2["capex_delta_dollars"]]
+        fig2 = go.Figure(go.Bar(
+            x=df_r2["event"].astype(str), y=df_r2["capex_delta_dollars"] / 1e6,
+            marker_color=colors2,
+        ))
+        _base_layout(fig2, "Capital Delta by Event", "Event #", "Capital Delta ($MM)")
+        fig2.add_hline(y=0, line_dash="dash", line_color="gray")
+        st.plotly_chart(fig2, use_container_width=True)
+
+    col_l2, col_r2 = st.columns(2)
+    with col_l2:
+        fig3 = go.Figure()
+        fig3.add_trace(go.Bar(name="Old Plan", x=filtered["event"].astype(str),
+                              y=filtered["old_cost_of_reserves"], marker_color=COLOR_OLD))
+        fig3.add_trace(go.Bar(name="New Plan", x=filtered["event"].astype(str),
+                              y=filtered["new_cost_of_reserves_derived"], marker_color=COLOR_NEW))
+        fig3.update_layout(barmode="group")
+        _base_layout(fig3, "Cost of Reserves: Old vs New", "Event #", "Cost of Reserves ($/boe)")
+        st.plotly_chart(fig3, use_container_width=True)
+
+    with col_r2:
+        # Cumulative contribution curve
+        ranked = filtered.sort_values("npv10_delta_dollars", ascending=False).copy()
+        ranked["cumulative_uplift"] = ranked["npv10_delta_dollars"].cumsum() / 1e6
+        ranked["event_rank"] = range(1, len(ranked) + 1)
+        fig4 = go.Figure(go.Scatter(
+            x=ranked["event_rank"], y=ranked["cumulative_uplift"],
+            mode="lines+markers", marker=dict(color=COLOR_NEW),
+        ))
+        _base_layout(fig4, "Cumulative NPV10 Uplift Contribution", "Event Rank", "Cumulative Uplift ($MM)")
+        st.plotly_chart(fig4, use_container_width=True)
+
+    # Event table
+    st.subheader("Event Detail Table")
+    display_cols = [
+        "event", COL_OLD_UWI_1, COL_OLD_UWI_2, COL_OLD_CURVE_1, COL_OLD_CURVE_2, COL_NEW_CURVE,
+        "old_capex_dollars", "new_capex_dollars", "capex_delta_dollars",
+        "old_npv10_dollars", "new_npv10_dollars", "npv10_delta_dollars",
+        "old_reserves_boe", "new_reserves_boe", "reserves_delta_boe",
+        "old_cost_of_reserves", "new_cost_of_reserves_derived",
+    ]
+    avail = [c for c in display_cols if c in filtered.columns]
+    st.dataframe(filtered[avail].sort_values("event"), use_container_width=True, hide_index=True)
+
+
+def render_inventory_opportunities(econ: pd.DataFrame):
+    st.header("Inventory Opportunities")
+
+    tab_ext, tab_cre = st.tabs(["Extensions", "Creations"])
+
+    with tab_ext:
+        st.subheader("Inventory Enhancements Identified")
+        st.caption("Newly identified opportunities compared against a one-mile reference. These are not modifications to a committed old plan.")
+        ext = econ[econ["event_type"] == "Extension"].copy()
+
+        if len(ext) == 0:
+            st.info("No extension events.")
+        else:
+            me1, me2, me3, me4 = st.columns(4)
+            me1.metric("Extension Opportunities", f"{len(ext):,}")
+            me2.metric("Incremental Capital", fmt_mm(ext["capex_delta_dollars"].sum()))
+            me3.metric("Incremental NPV10", fmt_mm(ext["npv10_delta_dollars"].sum()))
+            me4.metric("Incremental Reserves", fmt_mboe(ext["reserves_delta_boe"].sum()))
+
+            me5, me6, me7, me8 = st.columns(4)
+            me5.metric("Incremental OI", fmt_mm(ext["operating_income_delta_dollars"].sum()))
+            total_inc_cap = ext["capex_delta_dollars"].sum()
+            total_inc_npv = ext["npv10_delta_dollars"].sum()
+            me6.metric("Portfolio Marginal NPV/Cap", fmt_ratio(_safe_div(total_inc_npv, total_inc_cap)))
+            total_inc_res = ext["reserves_delta_boe"].sum()
+            me7.metric("Inc Cap/Inc BOE", fmt_dollarboe(_safe_div(total_inc_cap, total_inc_res)))
+            me8.metric("Inc NPV/Inc BOE", fmt_dollarboe(_safe_div(total_inc_npv, total_inc_res)))
+
+            col_l, col_r = st.columns(2)
+            with col_l:
+                df_r = ext.sort_values("npv10_delta_dollars", ascending=False)
+                fig = go.Figure(go.Bar(
+                    x=df_r["event"].astype(str), y=df_r["npv10_delta_dollars"] / 1e6,
+                    marker_color=COLOR_EXTENSION,
+                ))
+                _base_layout(fig, "Incremental NPV10 by Event", "Event #", "Incremental NPV10 ($MM)")
+                fig.add_hline(y=0, line_dash="dash", line_color="gray")
+                st.plotly_chart(fig, use_container_width=True)
+
+            with col_r:
+                fig2 = px.scatter(
+                    ext, x=ext["capex_delta_dollars"] / 1e6,
+                    y=ext["npv10_delta_dollars"] / 1e6,
+                    size=ext["reserves_delta_boe"].clip(lower=1).values,
+                    hover_data={"event": True},
+                )
+                _base_layout(fig2, "Incremental Capital vs Incremental NPV", "Incremental Capital ($MM)", "Incremental NPV10 ($MM)")
+                st.plotly_chart(fig2, use_container_width=True)
+
+            st.subheader("Extension Detail Table")
+            display_cols = [
+                "event", COL_OLD_CURVE_1, COL_OLD_CURVE_2, COL_NEW_CURVE,
+                "old_capex_dollars", "new_capex_dollars", "capex_delta_dollars",
+                "old_npv10_dollars", "new_npv10_dollars", "npv10_delta_dollars",
+                "old_reserves_boe", "new_reserves_boe", "reserves_delta_boe",
+                "marginal_npv_to_inc_capital",
+            ]
+            avail = [c for c in display_cols if c in ext.columns]
+            st.dataframe(ext[avail].sort_values("event"), use_container_width=True, hide_index=True)
+
+    with tab_cre:
+        st.subheader("New Inventory Identified")
+        st.caption("New opportunities where no prior type-curve opportunity existed. Gross opportunity economics are shown.")
+        cre = econ[econ["event_type"] == "Creation"].copy()
+
+        if len(cre) == 0:
+            st.info("No creation events.")
+        else:
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("New Locations", f"{len(cre):,}")
+            mc2.metric("New Inventory Capital", fmt_mm(cre["new_capex_dollars"].sum()))
+            mc3.metric("New Inventory NPV10", fmt_mm(cre["new_npv10_dollars"].sum()))
+            mc4.metric("New Inventory Reserves", fmt_mboe(cre["new_reserves_boe"].sum()))
+
+            mc5, mc6, mc7, mc8 = st.columns(4)
+            avg_npv_inv = _safe_div(cre["new_npv10_dollars"].sum(), cre["new_capex_dollars"].sum())
+            mc5.metric("Avg NPV/Investment", fmt_ratio(avg_npv_inv))
+            avg_cor = _safe_div(cre["new_capex_dollars"].sum(), cre["new_reserves_boe"].sum())
+            mc6.metric("Avg Cost of Reserves", fmt_dollarboe(avg_cor))
+            mc7.metric("Lifetime Revenue", fmt_mm(cre["new_lifetime_revenue_dollars"].sum()))
+            mc8.metric("Lifetime OI", fmt_mm(cre["new_lifetime_operating_income_dollars"].sum()))
+
+            col_l, col_r = st.columns(2)
+            with col_l:
+                df_r = cre.sort_values("new_npv10_dollars", ascending=False)
+                fig = go.Figure(go.Bar(
+                    x=df_r["event"].astype(str), y=df_r["new_npv10_dollars"] / 1e6,
+                    marker_color=COLOR_CREATION,
+                ))
+                _base_layout(fig, "New Inventory NPV10 by Event", "Event #", "NPV10 ($MM)")
+                st.plotly_chart(fig, use_container_width=True)
+
+            with col_r:
+                fig2 = px.scatter(
+                    cre, x=cre["new_capex_dollars"] / 1e6,
+                    y=cre["new_reserves_boe"] / 1e3,
+                    color=cre[COL_NEW_CURVE],
+                    hover_data={"event": True},
+                    labels={"x": "Capital ($MM)", "y": "Reserves (Mboe)", "color": "Type Curve"},
+                )
+                _base_layout(fig2, "New Inventory: Capital vs Reserves", "Capital ($MM)", "Reserves (Mboe)")
+                st.plotly_chart(fig2, use_container_width=True)
+
+            st.subheader("Creation Detail Table")
+            display_cols = [
+                "event", COL_NEW_CURVE,
+                "new_capex_dollars", "new_npv10_dollars", "new_reserves_boe",
+                "new_lifetime_revenue_dollars", "new_lifetime_operating_income_dollars",
+                "new_payout_source", "new_ror_pct", "new_npv_inv_ratio", "new_cost_of_reserves",
+            ]
+            avail = [c for c in display_cols if c in cre.columns]
+            st.dataframe(cre[avail].sort_values("event"), use_container_width=True, hide_index=True)
+
+
+def render_economic_indicators(econ: pd.DataFrame, indicators_clean: pd.DataFrame):
+    st.header("Economic Indicators")
+
+    # Filters
+    with st.expander("Filters", expanded=False):
+        fc1, fc2 = st.columns(2)
+        event_types = fc1.multiselect("Event Type", ["Consolidation", "Extension", "Creation"],
+                                      default=["Consolidation", "Extension", "Creation"], key="ei_et")
+        all_events = sorted(econ[econ["event_type"].isin(event_types)]["event"].unique())
+        sel_events = fc2.multiselect("Events", all_events, default=all_events, key="ei_ev")
+
+    filtered = econ[(econ["event_type"].isin(event_types)) & (econ["event"].isin(sel_events))]
+
+    if len(filtered) == 0:
+        st.info("No events match the current filters.")
+        return
+
+    # Grouped bar: Old vs New for key metrics
+    st.subheader("Old vs New Plan Comparison")
+
+    metric_options = {
+        "Capital ($MM)": ("old_capex_dollars", "new_capex_dollars", 1e6),
+        "NPV10 ($MM)": ("old_npv10_dollars", "new_npv10_dollars", 1e6),
+        "Reserves (Mboe)": ("old_reserves_boe", "new_reserves_boe", 1e3),
+        "Lifetime Revenue ($MM)": ("old_lifetime_revenue_dollars", "new_lifetime_revenue_dollars", 1e6),
+        "Lifetime Operating Income ($MM)": ("old_lifetime_operating_income_dollars", "new_lifetime_operating_income_dollars", 1e6),
+        "Lifetime Cash Flow ($MM)": ("old_lifetime_cash_flow_dollars", "new_lifetime_cash_flow_dollars", 1e6),
+    }
+    sel_metric = st.selectbox("Metric", list(metric_options.keys()), key="ei_metric")
+    old_col, new_col, divisor = metric_options[sel_metric]
+
+    non_creation = filtered[filtered["event_type"] != "Creation"]
+    if len(non_creation) > 0:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(name="Old / Reference", x=non_creation["event"].astype(str),
+                             y=non_creation[old_col] / divisor, marker_color=COLOR_OLD))
+        fig.add_trace(go.Bar(name="New / Opportunity", x=non_creation["event"].astype(str),
+                             y=non_creation[new_col] / divisor, marker_color=COLOR_NEW))
+        fig.update_layout(barmode="group")
+        _base_layout(fig, f"{sel_metric}: Old vs New (Consolidations & Extensions)", "Event #", sel_metric)
+        st.plotly_chart(fig, use_container_width=True)
+
+    creation_f = filtered[filtered["event_type"] == "Creation"]
+    if len(creation_f) > 0:
+        fig_c = go.Figure(go.Bar(
+            x=creation_f["event"].astype(str),
+            y=creation_f[new_col] / divisor,
+            marker_color=COLOR_CREATION,
+        ))
+        _base_layout(fig_c, f"{sel_metric}: New Inventory", "Event #", sel_metric)
+        st.plotly_chart(fig_c, use_container_width=True)
+
+    # Distribution of deltas
+    st.subheader("Delta Distribution")
+    delta_options = {
+        "Capital Delta ($MM)": ("capex_delta_dollars", 1e6),
+        "NPV10 Delta ($MM)": ("npv10_delta_dollars", 1e6),
+        "Reserves Delta (Mboe)": ("reserves_delta_boe", 1e3),
+        "OI Delta ($MM)": ("operating_income_delta_dollars", 1e6),
+    }
+    sel_delta = st.selectbox("Delta Metric", list(delta_options.keys()), key="ei_delta")
+    dcol, ddiv = delta_options[sel_delta]
+    fig_hist = px.histogram(
+        filtered, x=filtered[dcol] / ddiv, color="event_type",
+        nbins=30, labels={"x": sel_delta, "color": "Event Type"},
+        color_discrete_map={"Consolidation": COLOR_CONSOLIDATION, "Extension": COLOR_EXTENSION, "Creation": COLOR_CREATION},
+    )
+    _base_layout(fig_hist, f"Distribution of {sel_delta}", sel_delta, "Count")
+    st.plotly_chart(fig_hist, use_container_width=True)
+
+    # Scatter with selectable axes
+    st.subheader("Indicator Scatter")
+    scatter_options = {
+        "Capital ($MM)": ("new_capex_dollars", 1e6),
+        "NPV10 ($MM)": ("new_npv10_dollars", 1e6),
+        "Reserves (Mboe)": ("new_reserves_boe", 1e3),
+        "Cost of Reserves ($/boe)": ("new_cost_of_reserves_derived", 1),
+        "NPV/Investment": ("new_npv_inv_ratio", 1),
+        "Payout (years)": ("new_payout_source", 1),
+        "ROR (%)": ("new_ror_pct", 1),
+        "1st Year Rate (boepd)": ("new_first_year_rate_boepd", 1),
+    }
+    sc1, sc2 = st.columns(2)
+    x_sel = sc1.selectbox("X-Axis", list(scatter_options.keys()), index=0, key="ei_sx")
+    y_sel = sc2.selectbox("Y-Axis", list(scatter_options.keys()), index=1, key="ei_sy")
+    x_col, x_div = scatter_options[x_sel]
+    y_col, y_div = scatter_options[y_sel]
+
+    fig_sc = px.scatter(
+        filtered, x=filtered[x_col] / x_div, y=filtered[y_col] / y_div,
+        color="event_type", hover_data={"event": True},
+        labels={"x": x_sel, "y": y_sel, "color": "Event Type"},
+        color_discrete_map={"Consolidation": COLOR_CONSOLIDATION, "Extension": COLOR_EXTENSION, "Creation": COLOR_CREATION},
+    )
+    _base_layout(fig_sc, f"{y_sel} vs {x_sel}", x_sel, y_sel)
+    st.plotly_chart(fig_sc, use_container_width=True)
+
+
+def render_event_explorer(
+    econ: pd.DataFrame,
+    wells_classified: pd.DataFrame,
+    indicators_clean: pd.DataFrame,
+    forecasts_clean: pd.DataFrame,
+    event_forecasts: pd.DataFrame,
+    event_annual: pd.DataFrame,
+):
+    st.header("Event Explorer")
+
+    # Event selector
+    fc1, fc2 = st.columns([1, 3])
+    event_type_filter = fc1.selectbox("Event Type", ["All", "Consolidation", "Extension", "Creation"], key="ee_et")
+    if event_type_filter == "All":
+        avail_events = sorted(econ["event"].unique())
     else:
-        st.info("No forecast data matched to events.")
+        avail_events = sorted(econ[econ["event_type"] == event_type_filter]["event"].unique())
 
-    section("03", "Case Contribution")
-    c1, c2 = st.columns(2)
-    with c1:
-        show_fig(chart_case_bars(case_agg, "npv", "NPV by Case"), "sum_cnpv")
-    with c2:
-        show_fig(chart_case_bars(case_agg, "invest", "Investment by Case"), "sum_cinv")
-
-
-def page_economics(ev, port, case_agg, consol, fc, panel):
-    section("01", "Portfolio Economics — Before vs After")
-
-    rows = []
-    for key, label, fmt_fn, good in METRIC_DEFS:
-        b = port.get(f"before_{key}", np.nan)
-        a = port.get(f"after_{key}", np.nan)
-        d = (a - b) if not (_bad(a) or _bad(b)) else np.nan
-        pct_chg = safe_div(d, abs(b)) * 100 if not (_bad(d) or _bad(b)) else np.nan
-        verdict = DASH
-        if not _bad(d) and good and abs(d) > 1e-12:
-            verdict = "✅ better" if np.sign(d) * good > 0 else "❌ worse"
-        rows.append({
-            "Metric": label, "Before": fmt_fn(b), "After": fmt_fn(a),
-            "Delta": fmt_fn(d, signed=True),
-            "% Change": fmt_pct(pct_chg, signed=True) if not _bad(pct_chg) else DASH,
-            "Direction": verdict,
-        })
-    show_df(pd.DataFrame(rows), height=540)
-
-    section("02", "Per-Well Normalisation")
-    pw = []
-    fmap = {k: f for k, _, f, _ in METRIC_DEFS}
-    lmap = {k: l for k, l, _, _ in METRIC_DEFS}
-    for k in ADD_KEYS:
-        f = fmap.get(k, fmt_money)
-        lab = lmap.get(k, k)
-        b_pw = port.get(f"before_{k}_pw", np.nan)
-        a_pw = port.get(f"after_{k}_pw", np.nan)
-        d_pw = (a_pw - b_pw) if not (_bad(a_pw) or _bad(b_pw)) else np.nan
-        pw.append({
-            "Metric": f"{lab} / well",
-            "Before / well": f(b_pw), "After / well": f(a_pw),
-            "Delta / well": f(d_pw, signed=True),
-        })
-    show_df(pd.DataFrame(pw))
-
-    section("03", "All Events")
-    disp = pd.DataFrame({
-        "Event": ev["event_id"], "Case": ev["case"],
-        "Wells": ev["wells_before"].map(lambda x: f"{x:.0f}") + " → "
-                 + ev["wells_after"].map(lambda x: f"{x:.0f}"),
-        "Before NPV": ev["before_npv"].map(fmt_money),
-        "After NPV": ev["after_npv"].map(fmt_money),
-        "Δ NPV": ev["delta_npv"].map(lambda x: fmt_money(x, signed=True)),
-        "Δ Investment": ev["delta_invest"].map(lambda x: fmt_money(x, signed=True)),
-        "NPV/I After": ev["after_npv_inv"].map(fmt_ratio),
-    })
-    show_df(disp, height=460)
-
-    section("04", "Migration — Investment vs NPV")
-    show_fig(chart_migration(ev), "ec_mig")
-
-
-def page_cases(ev, port, case_agg, consol, fc, panel):
-    section("01", "Case Archetypes", "Consolidation · Extension · Creation")
-    present = [c for c in CASE_ORDER if c in case_agg]
-    if not present:
-        st.info("No classified events found.")
+    if not avail_events:
+        st.info("No events match filter.")
         return
 
-    summary = []
-    for c in present:
-        r = case_agg[c]
-        summary.append({
-            "Case": c, "Events": fmt_int(r["n_events"]),
-            "Wells Before": fmt_int(r["wells_before"]),
-            "Wells After": fmt_int(r["wells_after"]),
-            "Net Wells": fmt_int(r["wells_net"], signed=True),
-            "NPV Before": fmt_money(r["before_npv"]),
-            "NPV After": fmt_money(r["after_npv"]),
-            "Value Created": fmt_money(r.get("delta_npv"), signed=True),
-            "Investment Saved": fmt_money(r.get("invest_saved"), signed=True),
-            "NPV/I Before": fmt_ratio(r["before_npv_inv"]),
-            "NPV/I After": fmt_ratio(r["after_npv_inv"]),
-        })
-    show_df(pd.DataFrame(summary))
+    sel_event = fc2.selectbox("Event #", avail_events, key="ee_ev")
 
-    tabs = st.tabs(present)
-    for tab, case in zip(tabs, present):
-        with tab:
-            r = case_agg[case]
-            sub = ev[ev["case"] == case]
-            st.markdown(
-                f'<span class="pill" style="background:{CASE_CLR[case]}">{case}</span>'
-                f'<span style="color:#7A8A99;font-size:.85rem">{len(sub):,} events</span>',
-                unsafe_allow_html=True)
+    ev = econ[econ["event"] == sel_event].iloc[0]
 
-            kpi_grid([
-                dict(label="Events", value=fmt_int(r["n_events"]), tone="acc"),
-                dict(label="Wells Before → After",
-                     value=f"{fmt_int(r['wells_before'])} → {fmt_int(r['wells_after'])}",
-                     sub=f"Net {fmt_int(r['wells_net'], signed=True)}"),
-                _metric_card("npv", r["before_npv"], r["after_npv"]),
-                _metric_card("invest", r["before_invest"], r["after_invest"]),
-                _metric_card("npv_inv", r["before_npv_inv"], r["after_npv_inv"]),
-                _metric_card("boe", r["before_boe"], r["after_boe"]),
-                _metric_card("fy_rate", r["before_fy_rate"], r["after_fy_rate"]),
-                _metric_card("inv_boe", r["before_inv_boe"], r["after_inv_boe"]),
-            ], 4)
+    # --- Event Header ---
+    st.subheader(f"Event #{sel_event} — {ev['event_type']}")
+    st.caption(ev["event_story"])
 
-            st.markdown("**Economics Comparison**")
-            rows = []
-            for key, label, fmt_fn, good in METRIC_DEFS:
-                b = r.get(f"before_{key}", np.nan)
-                a = r.get(f"after_{key}", np.nan)
-                d = (a - b) if not (_bad(a) or _bad(b)) else np.nan
-                rows.append({"Metric": label, "Before": fmt_fn(b), "After": fmt_fn(a),
-                             "Delta": fmt_fn(d, signed=True)})
+    hc1, hc2, hc3, hc4 = st.columns(4)
+    hc1.markdown(f"**Old Well 1 UWI:** {ev[COL_OLD_UWI_1] or 'Not applicable'}")
+    hc2.markdown(f"**Old Well 2 UWI:** {ev[COL_OLD_UWI_2] or 'Not applicable'}")
+    hc3.markdown(f"**Old Curves:** {ev['old_type_curves_used'] or 'Not applicable'}")
+    hc4.markdown(f"**New Curve:** {ev['new_type_curve_used']}")
 
-            c1, c2 = st.columns([1, 1.25])
-            with c1:
-                show_df(pd.DataFrame(rows), height=430)
-            with c2:
-                case_eids = set(sub["event_id"])
-                cpanel = _build_panel(consol, fc, case_eids)
-                if not cpanel.empty:
-                    show_fig(chart_monthly(cpanel, "cf", f"{case} — Monthly Cash Flow"),
-                             f"cs_cf_{case}")
-                else:
-                    st.info("No forecast coverage for this case.")
+    # --- Financial Bridge ---
+    st.subheader("Financial Bridge")
 
-            st.markdown("**Events**")
-            top = sub.sort_values("delta_npv", ascending=False)
-            disp = pd.DataFrame({
-                "Event": top["event_id"],
-                "W1": top["w1_ent"], "W2": top["w2_ent"], "Enhanced": top["enh_ent"],
-                "Before NPV": top["before_npv"].map(fmt_money),
-                "After NPV": top["after_npv"].map(fmt_money),
-                "Δ NPV": top["delta_npv"].map(lambda x: fmt_money(x, signed=True)),
-                "Δ Investment": top["delta_invest"].map(lambda x: fmt_money(x, signed=True)),
-            })
-            show_df(disp)
+    old_label = "No Prior Opportunity" if ev["event_type"] == "Creation" else "Old / Reference"
 
+    bridge_data = [
+        ("Capital", fmt_mm(ev["old_capex_dollars"]), fmt_mm(ev["new_capex_dollars"]), fmt_mm(ev["capex_delta_dollars"])),
+        ("NPV10", fmt_mm(ev["old_npv10_dollars"]), fmt_mm(ev["new_npv10_dollars"]), fmt_mm(ev["npv10_delta_dollars"])),
+        ("Lifetime Revenue", fmt_mm(ev["old_lifetime_revenue_dollars"]), fmt_mm(ev["new_lifetime_revenue_dollars"]), fmt_mm(ev["revenue_delta_dollars"])),
+        ("Lifetime OI", fmt_mm(ev["old_lifetime_operating_income_dollars"]), fmt_mm(ev["new_lifetime_operating_income_dollars"]), fmt_mm(ev["operating_income_delta_dollars"])),
+        ("Lifetime Cash Flow", fmt_mm(ev["old_lifetime_cash_flow_dollars"]), fmt_mm(ev["new_lifetime_cash_flow_dollars"]), fmt_mm(ev["cash_flow_delta_dollars"])),
+        ("Reserves", fmt_mboe(ev["old_reserves_boe"]), fmt_mboe(ev["new_reserves_boe"]), fmt_mboe(ev["reserves_delta_boe"])),
+        ("Cost of Reserves", fmt_dollarboe(ev["old_cost_of_reserves"]), fmt_dollarboe(ev["new_cost_of_reserves_derived"]),
+         fmt_dollarboe(ev["cost_of_reserves_delta"]) if pd.notna(ev.get("cost_of_reserves_delta")) else "N/A"),
+        ("Payout", fmt_years(ev["old_payout_years"]), fmt_years(ev["new_payout_derived"]), "—"),
+        ("NPV / Investment", fmt_ratio(ev["old_npv_inv_ratio_derived"]), fmt_ratio(ev["new_npv_inv_ratio"]), "—"),
+        ("OI Margin $/boe", fmt_dollarboe(ev["old_lifetime_oi_per_boe"]), fmt_dollarboe(ev["new_lifetime_oi_per_boe"]), "—"),
+        ("NPV10 per BOE", fmt_dollarboe(ev["old_npv10_per_boe"]), fmt_dollarboe(ev["new_npv10_per_boe"]), "—"),
+    ]
 
-def page_forecast(ev, port, case_agg, consol, fc, panel):
-    section("01", "Forecast Analysis")
-    if panel.empty:
-        st.warning("No forecast data matched to events.")
-        return
-
-    tabs = st.tabs(["Cash Flow", "Revenue", "Operating Income"])
-    for tab, val, lab in zip(tabs, ["cf", "revenue", "opinc"],
-                             ["Cash Flow", "Revenue", "Operating Income"]):
-        with tab:
-            c1, c2 = st.columns(2)
-            with c1:
-                show_fig(chart_monthly(panel, val, f"Monthly {lab}"), f"fc_m_{val}")
-            with c2:
-                show_fig(chart_incremental_bars(panel, val,
-                                                f"Incremental {lab} + Cumulative"),
-                         f"fc_i_{val}")
-
-    section("02", "Cumulative Cash Flow")
-    fig = go.Figure()
-    for pre, col, nm, dash in (("before", CLR["before"], "Before", "dash"),
-                               ("after", CLR["after"], "After", "solid"),
-                               ("incr", CLR["incr"], "Incremental", "solid")):
-        fig.add_trace(go.Scatter(
-            x=panel["date"], y=panel[f"cum_{pre}_cf"], name=nm, mode="lines",
-            line=dict(color=col, width=2.4, dash=dash)))
-    fig.add_hline(y=0, line_color=CLR["slate"], line_width=1)
-    show_fig(_fin(fig, "Cumulative Cash Flow", 420, "$", tickpre="$"), "fc_cum")
-
-    section("03", "Annual Summary")
-    ann = panel.groupby("year").agg(
-        before_revenue=("before_revenue", "sum"),
-        after_revenue=("after_revenue", "sum"),
-        before_cf=("before_cf", "sum"),
-        after_cf=("after_cf", "sum"),
-        incr_cf=("incr_cf", "sum")).reset_index()
-    ann["cum_incr_cf"] = ann["incr_cf"].cumsum()
-    disp = pd.DataFrame({
-        "Year": ann["year"].astype(int),
-        "Revenue Before": ann["before_revenue"].map(fmt_money),
-        "Revenue After": ann["after_revenue"].map(fmt_money),
-        "CF Before": ann["before_cf"].map(fmt_money),
-        "CF After": ann["after_cf"].map(fmt_money),
-        "Incremental CF": ann["incr_cf"].map(lambda x: fmt_money(x, signed=True)),
-        "Cumulative Incr.": ann["cum_incr_cf"].map(lambda x: fmt_money(x, signed=True)),
-    })
-    show_df(disp, height=420)
-
-
-def page_event_explorer(ev, port, case_agg, consol, fc, panel):
-    section("01", "Event Explorer")
-    if ev.empty:
-        st.info("No events loaded.")
-        return
-
-    # Dropdown label: event# · well1name + well2name
-    def _label(r):
-        parts = [f"#{r['event_id']}"]
-        names = []
-        if r["w1_name"]:
-            names.append(r["w1_name"])
-        if r["w2_name"]:
-            names.append(r["w2_name"])
-        if names:
-            parts.append(" + ".join(names))
-        parts.append(f"→ {r['enh_ent']}")
-        parts.append(f"· {r['case']}")
-        return "  ".join(parts)
-
-    lbl_map = {r["event_id"]: _label(r) for _, r in ev.iterrows()}
-    pick = st.selectbox("Event", list(ev["event_id"]),
-                        format_func=lambda k: lbl_map.get(k, k))
-    r = ev[ev["event_id"] == pick].iloc[0]
-
-    st.markdown(
-        f'<span class="pill" style="background:{CASE_CLR.get(r["case"], CLR["slate"])}">'
-        f'{r["case"]}</span>', unsafe_allow_html=True)
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown("**Before — Well 1**")
-        st.write(r["w1_name"] or DASH)
-        st.caption(f"Entity: `{r['w1_ent'] or DASH}`")
-        if r["w1_ent"]:
-            st.caption(f"Found in econ: {'✅' if r.get('w1_found', False) else '❌'}")
-    with c2:
-        st.markdown("**Before — Well 2**")
-        st.write(r["w2_name"] or DASH)
-        st.caption(f"Entity: `{r['w2_ent'] or DASH}`")
-        if r["w2_ent"]:
-            st.caption(f"Found in econ: {'✅' if r.get('w2_found', False) else '❌'}")
-    with c3:
-        st.markdown("**After — Enhanced Well**")
-        st.write(f"`{r['enh_ent']}`")
-        st.caption(f"Found in econ: {'✅' if r.get('enh_found', False) else '❌'}")
-        st.caption(f"Wells: {r['wells_before']:.0f} → {r['wells_after']:.0f} "
-                   f"({fmt_int(r['wells_net'], signed=True)})")
-
-    kpi_grid([
-        _metric_card("npv", r["before_npv"], r["after_npv"]),
-        _metric_card("invest", r["before_invest"], r["after_invest"]),
-        _metric_card("capex", r["before_capex"], r["after_capex"]),
-        _metric_card("npv_inv", r["before_npv_inv"], r["after_npv_inv"]),
-        _metric_card("boe", r["before_boe"], r["after_boe"]),
-        _metric_card("fy_rate", r["before_fy_rate"], r["after_fy_rate"]),
-        _metric_card("payout", r["before_payout"], r["after_payout"]),
-        _metric_card("inv_boe", r["before_inv_boe"], r["after_inv_boe"]),
-    ], 4)
-
-    st.markdown("**Full Economics**")
-    rows = []
-    for key, label, fmt_fn, good in METRIC_DEFS:
-        b = r.get(f"before_{key}", np.nan)
-        a = r.get(f"after_{key}", np.nan)
-        d = (a - b) if not (_bad(a) or _bad(b)) else np.nan
-        rows.append({"Metric": label, "Before": fmt_fn(b), "After": fmt_fn(a),
-                     "Delta": fmt_fn(d, signed=True)})
-    show_df(pd.DataFrame(rows), height=430)
-
-    # Per-entity cash flow chart
-    section("02", "Type Curve Cash Flows")
-    entities = {}
-    if r["w1_ent"]:
-        entities[r["w1_ent"]] = f"W1: {r['w1_ent']}"
-    if r["w2_ent"] and r["w2_ent"] != r["w1_ent"]:
-        entities[r["w2_ent"]] = f"W2: {r['w2_ent']}"
-    entities[r["enh_ent"]] = f"Enhanced: {r['enh_ent']}"
-
-    if not fc.empty and entities:
-        show_fig(chart_entity_cf(fc, entities, "Monthly Cash Flow by Type Curve"), "ee_tcf")
-
-    section("03", "Event Combined Cash Flow")
-    ev_consol = [e for e in consol if e["event_id"] == pick]
-    ep = _build_panel(ev_consol, fc)
-    if ep.empty:
-        st.info("No forecast rows matched to this event.")
+    if ev["event_type"] == "Creation":
+        bridge_df = pd.DataFrame(bridge_data, columns=["Metric", old_label, "New / Opportunity", "Delta"])
+        # Clear old column for creations
+        bridge_df[old_label] = "—"
+        bridge_df["Delta"] = "—"
+        bridge_df.loc[bridge_df["Metric"].isin(["Capital", "NPV10", "Lifetime Revenue", "Lifetime OI",
+                                                  "Lifetime Cash Flow", "Reserves"]), "Delta"] = "N/A (new inventory)"
     else:
-        c1, c2 = st.columns(2)
-        with c1:
-            show_fig(chart_monthly(ep, "cf", "Monthly Cash Flow — Before vs After"), "ee_cf")
-        with c2:
-            show_fig(chart_incremental_bars(ep, "cf", "Incremental Cash Flow"), "ee_icf")
+        bridge_df = pd.DataFrame(bridge_data, columns=["Metric", old_label, "New / Opportunity", "Delta"])
+
+    st.dataframe(bridge_df, use_container_width=True, hide_index=True)
+
+    # --- Forecast Charts ---
+    st.subheader("Forecast Charts")
+    ev_fc = event_forecasts[event_forecasts["event"] == sel_event]
+    ev_ann = event_annual[event_annual["event"] == sel_event]
+
+    if len(ev_fc) > 0:
+        mc1, mc2 = st.columns(2)
+        metric_map = {
+            "Revenue": ("total_revenue_dollars", "cumulative_total_revenue_dollars"),
+            "Operating Income": ("operating_income_dollars", "cumulative_operating_income_dollars"),
+            "Cash Flow": ("cash_flow_dollars", "cumulative_cash_flow_dollars"),
+        }
+        sel_fc_metric = mc1.selectbox("Forecast Metric", list(metric_map.keys()), key="ee_fm")
+        sel_fc_view = mc2.selectbox("View", ["Monthly", "Cumulative", "Annual"], key="ee_fv")
+
+        monthly_col, cum_col = metric_map[sel_fc_metric]
+
+        if sel_fc_view == "Monthly":
+            fig = px.line(
+                ev_fc, x="producing_month", y=ev_fc[monthly_col] / 1e6,
+                color="series_label",
+                labels={"producing_month": "Producing Month", "y": f"{sel_fc_metric} ($MM)", "color": "Series"},
+            )
+            _base_layout(fig, f"Monthly {sel_fc_metric} — Event #{sel_event}", "Producing Month", f"{sel_fc_metric} ($MM)")
+            # Style: make combined old and new plan bolder
+            for trace in fig.data:
+                if "Combined" in trace.name or "New" in trace.name:
+                    trace.update(line=dict(width=3))
+                elif "Old Well" in trace.name or "One-Mile" in trace.name:
+                    trace.update(line=dict(width=1, dash="dash"))
+            st.plotly_chart(fig, use_container_width=True)
+
+        elif sel_fc_view == "Cumulative":
+            fig = px.line(
+                ev_fc, x="producing_month", y=ev_fc[cum_col] / 1e6,
+                color="series_label",
+            )
+            _base_layout(fig, f"Cumulative {sel_fc_metric} — Event #{sel_event}", "Producing Month", f"Cumulative {sel_fc_metric} ($MM)")
+            for trace in fig.data:
+                if "Combined" in trace.name or "New" in trace.name:
+                    trace.update(line=dict(width=3))
+                elif "Old Well" in trace.name or "One-Mile" in trace.name:
+                    trace.update(line=dict(width=1, dash="dash"))
+            st.plotly_chart(fig, use_container_width=True)
+
+        else:  # Annual
+            fig = px.bar(
+                ev_ann, x=COL_FORECAST_YEAR, y=ev_ann[monthly_col] / 1e6,
+                color="series_label", barmode="group",
+                labels={COL_FORECAST_YEAR: "Year", "y": f"{sel_fc_metric} ($MM)", "color": "Series"},
+            )
+            _base_layout(fig, f"Annual {sel_fc_metric} — Event #{sel_event}", "Year", f"{sel_fc_metric} ($MM)")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Chart download
+        with st.expander("Download Current Chart"):
+            html_bytes = plotly_to_html_bytes(fig)
+            st.download_button("Download Chart HTML", html_bytes, f"event_{sel_event}_chart.html", "text/html", key="ee_dl_html")
+            img = plotly_to_image_bytes(fig, "png")
+            if img:
+                st.download_button("Download Chart PNG", img, f"event_{sel_event}_chart.png", "image/png", key="ee_dl_png")
+            else:
+                st.caption("PNG export not available (Kaleido may not be installed).")
+    else:
+        st.info("No forecast data for this event.")
+
+    # --- Backend Rollup Tables ---
+    st.subheader("Backend Rollup Tables")
+
+    with st.expander("Source Wells Row"):
+        w_row = wells_classified[wells_classified[COL_EVENT] == sel_event]
+        st.dataframe(w_row, use_container_width=True, hide_index=True)
+
+    with st.expander("Source Economic Indicator Rows Used"):
+        curves_used = set()
+        if pd.notna(ev.get(COL_OLD_CURVE_1)):
+            curves_used.add(ev[COL_OLD_CURVE_1])
+        if pd.notna(ev.get(COL_OLD_CURVE_2)):
+            curves_used.add(ev[COL_OLD_CURVE_2])
+        curves_used.add(ev[COL_NEW_CURVE])
+        curves_used.discard(None)
+        ind_rows = indicators_clean[indicators_clean[COL_TYPE_CURVE].isin(curves_used)]
+        st.dataframe(ind_rows, use_container_width=True, hide_index=True)
+
+    with st.expander("Source Forecast Rows Used"):
+        fc_rows = forecasts_clean[forecasts_clean[COL_TYPE_CURVE].isin(curves_used)]
+        st.dataframe(fc_rows, use_container_width=True, hide_index=True)
+
+    with st.expander("Event Monthly Forecast Series"):
+        st.dataframe(ev_fc, use_container_width=True, hide_index=True)
+
+    with st.expander("Event Economic Output Record"):
+        ev_record = econ[econ["event"] == sel_event]
+        st.dataframe(ev_record, use_container_width=True, hide_index=True)
+
+    # --- Event Downloads ---
+    st.subheader("Event Downloads")
+    dl1, dl2, dl3, dl4 = st.columns(4)
+    ev_record_df = econ[econ["event"] == sel_event]
+    dl1.download_button("Event Summary CSV", dataframe_to_csv_bytes(ev_record_df),
+                        f"event_{sel_event}_summary.csv", "text/csv", key="ee_dl_sum")
+    dl2.download_button("Event Monthly Forecast CSV", dataframe_to_csv_bytes(ev_fc),
+                        f"event_{sel_event}_monthly.csv", "text/csv", key="ee_dl_mfc")
+    dl3.download_button("Event Annual Forecast CSV", dataframe_to_csv_bytes(ev_ann),
+                        f"event_{sel_event}_annual.csv", "text/csv", key="ee_dl_afc")
+
+    sheets = {
+        "Summary": ev_record_df,
+        "Monthly Forecasts": ev_fc,
+        "Annual Forecasts": ev_ann,
+        "Source Indicators": ind_rows,
+    }
+    dl4.download_button("Event Workbook XLSX", dataframes_to_excel_bytes(sheets),
+                        f"event_{sel_event}_workbook.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="ee_dl_xlsx")
 
 
-# ─── PAGE REGISTRY ──────────────────────────────────────────────────────────
+def render_downloads(
+    econ: pd.DataFrame,
+    exec_summary: pd.DataFrame,
+    event_forecasts: pd.DataFrame,
+    event_annual: pd.DataFrame,
+    validation_report: pd.DataFrame,
+    wells_classified: pd.DataFrame,
+    indicators_clean: pd.DataFrame,
+    forecasts_clean: pd.DataFrame,
+):
+    st.header("Data & Downloads")
 
-PAGES = {
-    "Executive Summary": page_summary,
-    "Portfolio Economics": page_economics,
-    "Case Analysis": page_cases,
-    "Forecast Analysis": page_forecast,
-    "Event Explorer": page_event_explorer,
-}
+    st.subheader("Portfolio Exports")
+
+    csv_files: dict[str, bytes] = {}
+
+    c1, c2, c3, c4 = st.columns(4)
+    b = dataframe_to_csv_bytes(econ)
+    csv_files["event_economics.csv"] = b
+    c1.download_button("Event Economics CSV", b, "event_economics.csv", "text/csv", key="dl_ee")
+
+    b2 = dataframe_to_csv_bytes(exec_summary)
+    csv_files["executive_summary.csv"] = b2
+    c2.download_button("Executive Summary CSV", b2, "executive_summary.csv", "text/csv", key="dl_es")
+
+    b3 = dataframe_to_csv_bytes(event_forecasts)
+    csv_files["event_monthly_forecasts.csv"] = b3
+    c3.download_button("Monthly Forecasts CSV", b3, "event_monthly_forecasts.csv", "text/csv", key="dl_mf")
+
+    b4 = dataframe_to_csv_bytes(event_annual)
+    csv_files["event_annual_forecasts.csv"] = b4
+    c4.download_button("Annual Forecasts CSV", b4, "event_annual_forecasts.csv", "text/csv", key="dl_af")
+
+    c5, c6, c7, _ = st.columns(4)
+    b5 = dataframe_to_csv_bytes(validation_report)
+    csv_files["validation_report.csv"] = b5
+    c5.download_button("Validation Report CSV", b5, "validation_report.csv", "text/csv", key="dl_vr")
+
+    # XLSX workbook
+    xlsx_sheets = {
+        "Executive Summary": exec_summary,
+        "Event Economics": econ,
+        "Monthly Forecasts": event_forecasts,
+        "Annual Forecasts": event_annual,
+        "Validation Report": validation_report,
+        "Source Wells": wells_classified.drop(columns=["populated_old_curves"], errors="ignore"),
+        "Source Indicators": indicators_clean,
+        "Source Forecasts": forecasts_clean,
+    }
+    xlsx_bytes = dataframes_to_excel_bytes(xlsx_sheets)
+    csv_files["calculated_outputs.xlsx"] = xlsx_bytes
+    c6.download_button("Calculated Outputs XLSX", xlsx_bytes, "calculated_outputs.xlsx",
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_xlsx")
+
+    # ZIP
+    zip_bytes = build_zip_bytes(csv_files)
+    c7.download_button("All Outputs ZIP", zip_bytes, "calculated_outputs.zip", "application/zip", key="dl_zip")
 
 
-# ─── MAIN ────────────────────────────────────────────────────────────────────
+def render_data_quality(
+    validation_report: pd.DataFrame,
+    wells_classified: pd.DataFrame,
+    indicators_clean: pd.DataFrame,
+    forecasts_clean: pd.DataFrame,
+):
+    st.header("Data Quality")
+
+    st.subheader("Workbook Information")
+    ic1, ic2, ic3 = st.columns(3)
+    ic1.markdown(f"**Workbook:** `{WORKBOOK_PATH}`")
+    try:
+        mtime = WORKBOOK_PATH.stat().st_mtime
+        import datetime
+        ic2.markdown(f"**Modified:** {datetime.datetime.fromtimestamp(mtime)}")
+    except Exception:
+        ic2.markdown("**Modified:** Unknown")
+    ic3.markdown(f"**Sheets:** {SHEET_WELLS}, {SHEET_ECONOMIC_INDICATORS}, {SHEET_FORECASTS}")
+
+    st.subheader("Row Counts")
+    rc1, rc2, rc3 = st.columns(3)
+    rc1.metric("Wells Rows", f"{len(wells_classified):,}")
+    rc2.metric("Indicator Rows", f"{len(indicators_clean):,}")
+    rc3.metric("Forecast Rows", f"{len(forecasts_clean):,}")
+
+    st.subheader("Event Classification")
+    vc = wells_classified["event_type"].value_counts()
+    for et in ["Consolidation", "Extension", "Creation"]:
+        st.write(f"- **{et}:** {vc.get(et, 0):,}")
+
+    st.subheader("Type Curve Coverage")
+    ref_curves = set()
+    ref_curves.update(wells_classified[COL_NEW_CURVE].dropna().unique())
+    ref_curves.update(wells_classified[COL_OLD_CURVE_1].dropna().unique())
+    ref_curves.update(wells_classified[COL_OLD_CURVE_2].dropna().unique())
+    ref_curves.discard("")
+
+    ind_curves = set(indicators_clean[COL_TYPE_CURVE].dropna().unique())
+    fc_curves = set(forecasts_clean[COL_TYPE_CURVE].dropna().unique())
+
+    st.write(f"- **Referenced curves:** {len(ref_curves)}")
+    st.write(f"- **Found in indicators:** {len(ref_curves & ind_curves)}")
+    st.write(f"- **Found in forecasts:** {len(ref_curves & fc_curves)}")
+    st.write(f"- **Extra in indicators (unused):** {len(ind_curves - ref_curves)}")
+    st.write(f"- **Extra in forecasts (unused):** {len(fc_curves - ref_curves)}")
+
+    missing_ind = ref_curves - ind_curves
+    missing_fc = ref_curves - fc_curves
+    if missing_ind:
+        st.error(f"Missing from indicators: {missing_ind}")
+    if missing_fc:
+        st.error(f"Missing from forecasts: {missing_fc}")
+
+    st.subheader("Validation Report")
+    st.dataframe(validation_report, use_container_width=True, hide_index=True)
+    st.download_button("Download Validation Report", dataframe_to_csv_bytes(validation_report),
+                       "validation_report.csv", "text/csv", key="dq_dl_vr")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ════════════════════════════════════════════════════════════════════════════════
 
 def main():
-    header()
+    st.set_page_config(
+        page_title="Viewfield Bakken Exploitation Review",
+        page_icon="📈",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
 
-    try:
-        ev_df, consol, fc, econ, debug = build_events()
-    except (FileNotFoundError, ValueError) as e:
-        st.error(str(e))
-        st.info("Place `economics.xlsx`, `consol.xlsx`, `forecast.xlsx`, and `capex.xlsx` "
-                "next to `app.py` or in a `./data` subfolder.")
-        return
+    st.sidebar.title("Viewfield Bakken Review")
 
-    if ev_df.empty:
-        st.warning("No events built from consol.xlsx.")
-        with st.expander("🔍 Debug — why no events?"):
-            st.write(f"**Economics entities loaded:** {debug['econ_entities']}")
-            st.write(f"**Consol events parsed:** {debug['consol_events']}")
-            st.write(f"**Forecast rows:** {debug['fc_rows']}")
-            st.write("**Economics column matching:**")
-            st.json(debug["econ_columns"])
-            st.write("**Sample entity keys from economics:**", debug["sample_econ_keys"])
-            st.write("**Sample enhanced entities from consol:**", debug["sample_consol_enh"])
-            st.write("**Sample w1 entities from consol:**", debug["sample_consol_w1"])
-            # Check overlap
-            econ_set = set(debug["sample_econ_keys"])
-            consol_enh = debug["sample_consol_enh"]
-            for e in consol_enh:
-                st.write(f"  `{e}` in economics? {e in econ_set}")
-        return
+    # -- Check workbook exists --
+    if not WORKBOOK_PATH.exists():
+        st.error(f"The required file `economics.xlsx` was not found beside `app.py`.\n\nExpected: `{WORKBOOK_PATH}`")
+        st.stop()
 
-    # Check join health
-    n_enh_found = ev_df["enh_found"].sum()
-    n_enh_miss = len(ev_df) - n_enh_found
-    if n_enh_miss > 0:
-        callout("bad", f"<b>{n_enh_miss}</b> of {len(ev_df)} enhanced entities not found "
-                       f"in economics.xlsx — their After values will be blank.")
+    # -- Load --
+    mtime_ns = WORKBOOK_PATH.stat().st_mtime_ns
+    sheets = load_workbook(str(WORKBOOK_PATH), mtime_ns)
 
-    # Sidebar
-    sb = st.sidebar
-    sb.markdown("### ⛽ Navigation")
-    page = sb.radio("Page", list(PAGES), label_visibility="collapsed")
-    sb.markdown("---")
-    sb.markdown("### Scope")
-    cases = sb.multiselect("Event Cases", CASE_ORDER, default=CASE_ORDER)
-    sb.markdown("---")
-    sb.caption(f"**{debug['econ_entities']}** economics entities")
-    sb.caption(f"**{len(ev_df)}** events ({n_enh_found} enhanced matched)")
-    sb.caption(f"**{debug['fc_rows']:,}** forecast rows")
-    sb.markdown("---")
-    if sb.button("🔄 Reload Data"):
-        st.cache_data.clear()
-        st.rerun()
+    wells_raw = sheets[SHEET_WELLS]
+    indicators_raw = sheets[SHEET_ECONOMIC_INDICATORS]
+    forecasts_raw = sheets[SHEET_FORECASTS]
 
-    # Show debug expander on every page
-    with st.sidebar.expander("🔍 Debug"):
-        st.write("**Econ columns found:**")
-        st.json(debug["econ_columns"]["columns_matched"])
-        if debug["econ_columns"]["columns_missing"]:
-            st.warning(f"Missing: {debug['econ_columns']['columns_missing']}")
-        st.write("**Sample econ keys:**", debug["sample_econ_keys"][:5])
-        st.write("**Sample consol enh:**", debug["sample_consol_enh"][:5])
-        st.write("**Sample consol w1:**", debug["sample_consol_w1"][:5])
+    # -- Validate --
+    validation_report = validate_workbook_schema(wells_raw, indicators_raw, forecasts_raw)
 
-    # Filter
-    ev = ev_df[ev_df["case"].isin(cases)].copy()
-    if ev.empty:
-        st.warning("No events match the selected cases.")
-        return
+    # -- Classify & prepare --
+    wells_classified = classify_events(wells_raw)
 
-    port = _aggregate(ev)
+    indicators_clean = prepare_indicators(indicators_raw)
 
-    case_agg = {}
-    for c in CASE_ORDER:
-        sub = ev[ev["case"] == c]
-        if not sub.empty:
-            case_agg[c] = _aggregate(sub)
+    # Referenced curves
+    ref_curves: set[str] = set()
+    ref_curves.update(wells_classified[COL_NEW_CURVE].dropna().unique())
+    ref_curves.update(wells_classified[COL_OLD_CURVE_1].dropna().unique())
+    ref_curves.update(wells_classified[COL_OLD_CURVE_2].dropna().unique())
+    ref_curves.discard("")
 
-    panel = _build_panel(consol, fc, set(ev["event_id"]))
+    forecasts_clean = prepare_forecasts(forecasts_raw, ref_curves)
+    lifetime = build_type_curve_lifetime(forecasts_clean)
+    econ = build_event_economics(wells_classified, indicators_clean, lifetime, forecasts_clean)
+    event_forecasts = build_event_forecasts(wells_classified, forecasts_clean)
+    event_annual = build_event_annual_forecasts(event_forecasts)
+    exec_summary = build_executive_summary(econ)
 
-    PAGES[page](ev, port, case_agg, consol, fc, panel)
+    # -- Navigation --
+    page = st.sidebar.radio(
+        "Navigate",
+        [
+            "Executive Summary",
+            "Existing Plan Optimization",
+            "Inventory Opportunities",
+            "Economic Indicators",
+            "Event Explorer",
+            "Data & Downloads",
+            "Data Quality",
+        ],
+    )
 
-    st.markdown("---")
-    st.caption(f"{len(ev):,} events · economics ×{ECON_MONEY_SCALE:g}")
+    if page == "Executive Summary":
+        render_executive_summary(econ, exec_summary, event_forecasts)
+    elif page == "Existing Plan Optimization":
+        render_existing_plan_optimization(econ, event_forecasts)
+    elif page == "Inventory Opportunities":
+        render_inventory_opportunities(econ)
+    elif page == "Economic Indicators":
+        render_economic_indicators(econ, indicators_clean)
+    elif page == "Event Explorer":
+        render_event_explorer(econ, wells_classified, indicators_clean, forecasts_clean, event_forecasts, event_annual)
+    elif page == "Data & Downloads":
+        render_downloads(econ, exec_summary, event_forecasts, event_annual, validation_report,
+                         wells_classified, indicators_clean, forecasts_clean)
+    elif page == "Data Quality":
+        render_data_quality(validation_report, wells_classified, indicators_clean, forecasts_clean)
 
 
 if __name__ == "__main__":
