@@ -1,8 +1,8 @@
 """
-Viewfield Bakken Exploitation Review Dashboard
+Viewfield Bakken Exploitation  Dashboard
 ================================================
 A production-quality Streamlit dashboard that reads economics.xlsx
-and presents the results of a Viewfield Bakken exploitation review.
+and presents the results of a Viewfield Bakken exploitation .
 """
 from __future__ import annotations
 
@@ -709,7 +709,7 @@ def build_executive_summary(econ: pd.DataFrame) -> pd.DataFrame:
 
     total = {
         "category": "Combined",
-        "event_story": "Total Review Impact",
+        "event_story": "Total  Impact",
         "events": sum(r["events"] for r in rows),
         "primary_value_dollars": sum(r["primary_value_dollars"] for r in rows),
         "capital_dollars": sum(r["capital_dollars"] for r in rows),
@@ -856,7 +856,7 @@ def _base_layout(fig: go.Figure, title: str, xaxis: str = "", yaxis: str = ""):
 # ════════════════════════════════════════════════════════════════════════════════
 
 def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, event_forecasts: pd.DataFrame):
-    st.header("Viewfield Bakken Exploitation Review")
+    st.header("Viewfield Bakken Exploitation ")
     st.caption("Development-plan optimization and inventory opportunities identified")
 
     consol = econ[econ["event_type"] == "Consolidation"]
@@ -874,23 +874,23 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
         + cre["new_capex_dollars"].sum()
     )
 
-    # --- Section A: Overall Review ---
-    st.subheader("Overall Review")
+    # --- Section A: Overall  ---
+    st.subheader("Overall ")
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Total Events Reviewed", f"{len(econ):,}")
+    c1.metric("Total Events ed", f"{len(econ):,}")
     c2.metric("Existing Plan Optimizations", f"{len(consol):,}")
     c3.metric("Inventory Enhancements", f"{len(ext):,}")
     c4.metric("New Inventory Locations", f"{len(cre):,}")
-    c5.metric("Review Value Change (+ added / - removed)", fmt_signed_mm(total_val))
-    c6.metric("Review Capital Change (+ added / - saved)", fmt_signed_mm(total_cap))
+    c5.metric(" Value Change (+ added / - removed)", fmt_signed_mm(total_val))
+    c6.metric(" Capital Change (+ added / - saved)", fmt_signed_mm(total_cap))
     st.caption(
-        "Review Value = consolidation NPV10 change + extension incremental NPV10 + creation NPV10. "
-        "Review Capital = consolidation capital change + extension incremental capital + creation capital. "
+        " Value = consolidation NPV10 change + extension incremental NPV10 + creation NPV10. "
+        " Capital = consolidation capital change + extension incremental capital + creation capital. "
         "Positive values are added; negative values are removed or saved."
     )
 
-    # --- Section B: Review Value Mix ---
-    st.subheader("Review Value Mix")
+    # --- Section B:  Value Mix ---
+    st.subheader(" Value Mix")
     value_mix = pd.DataFrame({
         "Category": [
             "Existing Plan Optimization",
@@ -910,11 +910,11 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
             values=pie_values,
             customdata=value_mix["Value"] / 1e6,
             texttemplate="%{label}<br>%{percent}<br>$%{customdata:.1f} MM",
-            hovertemplate="%{label}<br>Review value: $%{customdata:.2f} MM<extra></extra>",
+            hovertemplate="%{label}<br> value: $%{customdata:.2f} MM<extra></extra>",
             hole=0.35,
         ))
         fig_mix.update_layout(
-            title="Share of Positive Review Value",
+            title="Share of Positive  Value",
             template="plotly_white",
             margin=dict(l=30, r=30, t=60, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=-0.15),
@@ -923,7 +923,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
         if (value_mix["Value"] < 0).any():
             st.caption("Negative category values are excluded from pie-slice sizing and remain visible in the signed summary metrics above.")
     else:
-        st.info("No positive review value is available for the pie chart.")
+        st.info("No positive  value is available for the pie chart.")
 
     # --- Section C: Existing Plan Optimization ---
     st.subheader("Existing Plan Optimization (Consolidations)")
@@ -1473,13 +1473,13 @@ def render_downloads(
 
 def main():
     st.set_page_config(
-        page_title="Viewfield Bakken Exploitation Review",
+        page_title="Viewfield Bakken Exploitation ",
         page_icon="📈",
         layout="wide",
         initial_sidebar_state="expanded",
     )
 
-    st.sidebar.title("Viewfield Bakken Review")
+    st.sidebar.title("Viewfield Bakken ")
 
     # -- Check workbook exists --
     if not WORKBOOK_PATH.exists():
