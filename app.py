@@ -1,4 +1,3 @@
-"""
 Viewfield Bakken Exploitation  Dashboard
 ================================================
 A production-quality Streamlit dashboard that reads economics.xlsx
@@ -910,6 +909,7 @@ def _base_layout(fig: go.Figure, title: str, xaxis: str = "", yaxis: str = ""):
 
 def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, event_forecasts: pd.DataFrame):
     st.header("Portfolio Summary")
+    st.caption("Approved KPIs only: category counts and the specified economic measures.")
 
     consol = econ[econ["event_type"] == "Consolidation"]
     ext = econ[econ["event_type"] == "Extension"]
