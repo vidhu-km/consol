@@ -882,7 +882,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     c3.metric("Inventory Enhancements", f"{len(ext):,}")
     c4.metric("New Inventory Locations", f"{len(cre):,}")
     c5.metric(" Value Change ", fmt_signed_mm(total_val))
-    c6.metric(" Capital Change (+ added / - saved)", fmt_signed_mm(total_cap))
+    c6.metric(" Capital Change ", fmt_signed_mm(total_cap))
     st.caption(
         " Value = consolidation NPV10 change + extension incremental NPV10 + creation NPV10. "
         " Capital = consolidation capital change + extension incremental capital + creation capital. "
@@ -936,7 +936,7 @@ def render_executive_summary(econ: pd.DataFrame, exec_summary: pd.DataFrame, eve
     cd1, cd2, cd3, cd4 = st.columns(4)
     cd1.metric("NPV10 Change", fmt_signed_mm(consol["npv10_delta_dollars"].sum()))
     cap_delta_sum = consol["capex_delta_dollars"].sum()
-    cd2.metric("Capital Change (+ added / - saved)", fmt_signed_mm(cap_delta_sum))
+    cd2.metric("Capital Change ", fmt_signed_mm(cap_delta_sum))
     cd3.metric("Reserves Change", fmt_signed_mboe(consol["reserves_delta_boe"].sum()))
     cd4.metric("OI Change", fmt_signed_mm(consol["operating_income_delta_dollars"].sum()))
 
@@ -1039,7 +1039,7 @@ def render_existing_plan_optimization(econ: pd.DataFrame, event_forecasts: pd.Da
     mc1.metric("Events", f"{len(filtered):,}")
     mc2.metric("Old Plan Capital", fmt_mm(filtered["old_capex_dollars"].sum()))
     mc3.metric("New Plan Capital", fmt_mm(filtered["new_capex_dollars"].sum()))
-    mc4.metric("Capital Change (+ added / - saved)", fmt_signed_mm(filtered["capex_delta_dollars"].sum()))
+    mc4.metric("Capital Change ", fmt_signed_mm(filtered["capex_delta_dollars"].sum()))
     mc5.metric("NPV10 Change", fmt_signed_mm(filtered["npv10_delta_dollars"].sum()))
 
     mc6, mc7, mc8, mc9, mc10 = st.columns(5)
