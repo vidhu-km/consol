@@ -85,12 +85,6 @@ PAL_POSITIVE = "#16A34A"        # green-600
 PAL_NEGATIVE = "#DC2626"        # red-600
 PAL_BG = "#F8FAFC"              # slate-50
 
-# Executive-summary development ladder
-LADDER_CURVE_125 = "VF_BAK_2.0M_125 (June 2026)"
-LADDER_CURVE_100 = "VF_BAK_2.0M_100 (June 2026)"
-LADDER_CURVE_75 = "VF_BAK_2.0M_75 (June 2026)"
-LADDER_WELLS_PER_YEAR = 22
-
 CATEGORY_COLORS = {
     "Consolidation": PAL_CONSOLIDATION,
     "Extension": PAL_EXTENSION,
@@ -634,94 +628,120 @@ def _build_zip(files: dict[str, bytes]) -> bytes:
 
 # ── 1. PORTFOLIO OVERVIEW ─────────────────────────────────────────────────────
 def render_portfolio_overview(econ: pd.DataFrame):
-    """Executive summary focused on annual capital savings and value/production uplift."""
-    st.title("📊 Executive Summary")
-    st.caption("Inventory sequencing and annualized value impact from the VFB 2026 inventory overhaul")
+    """Top-level page: one card per narrative with aggregate KPIs + a value bridge chart."""
+    st.title("📊 Portfolio Overview")
+    st.caption("High-level value creation across all three strategies")
 
-    # Default user view excludes the 75 curve, while keeping it available in the filter.
-    all_curves = sorted(econ[COL_NEW_CURVE].dropna().unique())
-    default_curves = [c for c in all_curves if c != LADDER_CURVE_75]
+    consol = econ[econ["event_type"] == "Consolidation"]
+    ext = econ[econ["event_type"] == "Extension"]
+    cre = econ[econ["event_type"] == "Creation"]
+
+    # ── Filters ───────────────────────────────────────────────────────────
     with st.expander("🔍 Filters", expanded=False):
-        sel_curves = st.multiselect(
-            "New Type Curves", all_curves, default=default_curves, key="po_curves",
-            help=f"{LADDER_CURVE_75} is excluded by default but can be added here.",
-        )
-    filtered = econ[econ[COL_NEW_CURVE].isin(sel_curves)].copy()
+        fc1, fc2, fc3 = st.columns(3)
+        all_types = ["Consolidation", "Extension", "Creation"]
+        sel_types = fc1.multiselect("Event Types", all_types, default=all_types, key="po_types")
+        all_curves = sorted(econ[COL_NEW_CURVE].dropna().unique())
+        sel_curves = fc2.multiselect("New Type Curves", all_curves, default=all_curves, key="po_curves")
+        all_events = sorted(econ["event"].unique())
+        sel_events = fc3.multiselect("Event #s (leave blank = all)", all_events, default=[], key="po_events")
 
-    st.subheader("Development Ladder — 22 Wells / Year")
+    mask = econ["event_type"].isin(sel_types) & econ[COL_NEW_CURVE].isin(sel_curves)
+    if sel_events:
+        mask = mask & econ["event"].isin(sel_events)
+    filtered = econ[mask]
+    consol = filtered[filtered["event_type"] == "Consolidation"]
+    ext = filtered[filtered["event_type"] == "Extension"]
+    cre = filtered[filtered["event_type"] == "Creation"]
+
+    # ── KPI cards ─────────────────────────────────────────────────────────
+    st.markdown("---")
+
+    # Narrative 1 — Consolidation
+    st.subheader(f"🔵 Consolidation — Capital Removal  ({len(consol)} events)")
     st.markdown(
-        f"**Sequence:** exhaust **{LADDER_CURVE_125}** first, then develop "
-        f"**{LADDER_CURVE_100}** at **{LADDER_WELLS_PER_YEAR} wells/year**. "
-        f"**{LADDER_CURVE_75}** is held outside the default user view."
+        "_Drilling one 2-mile well instead of two 1-mile wells "
+        "saves capital while maintaining strong per-barrel economics._"
+    )
+    c1, c2, c3, c4 = st.columns(4)
+    total_cap_saved = consol["capital_saved_dollars"].sum()
+    avg_cor_improv = consol["cost_of_reserves_improvement"].mean()
+    avg_new_cor = consol["new_cost_of_reserves_derived"].mean()
+    avg_old_cor = consol["old_cost_of_reserves_derived"].mean()
+    c1.metric("Capital Saved", _f_mm(total_cap_saved), help="Old plan Capex minus new plan Capex")
+    c2.metric(
+        "Old Average Cost/boe",
+        _f_dollarboe(avg_old_cor),
+        help="Average cost of reserves for the old plan",
+    )
+    c3.metric(
+        "New Average Cost/boe",
+        _f_dollarboe(avg_new_cor),
+        help="Average cost of reserves for the new plan",
+    )
+    c4.metric(
+        "$/boe Saved",
+        _f_dollarboe(avg_cor_improv),
+        help="Average reduction in cost per boe (old - new)",
     )
 
-    ladder_rows = []
-    for priority, curve in enumerate([LADDER_CURVE_125, LADDER_CURVE_100], 1):
-        d = filtered[filtered[COL_NEW_CURVE] == curve]
-        wells = len(d)
-        ladder_rows.append({
-            "Priority": priority,
-            "Type Curve": curve,
-            "Inventory (wells)": wells,
-            "Years @ 22 wells/yr": wells / LADDER_WELLS_PER_YEAR if wells else 0.0,
-            "Capital Saved ($MM)": d["capital_saved_dollars"].sum() / 1e6,
-            "NPV10 Added ($MM)": d["npv10_delta_dollars"].sum() / 1e6,
-            "Production Added (Mboe)": d["lifetime_volume_delta_boe"].sum() / 1e3,
-        })
-    ladder = pd.DataFrame(ladder_rows)
-    st.dataframe(
-        ladder, use_container_width=True, hide_index=True,
-        column_config={
-            "Years @ 22 wells/yr": st.column_config.NumberColumn(format="%.1f"),
-            "Capital Saved ($MM)": st.column_config.NumberColumn(format="$%.1f"),
-            "NPV10 Added ($MM)": st.column_config.NumberColumn(format="$%.1f"),
-            "Production Added (Mboe)": st.column_config.NumberColumn(format="%.1f"),
-        },
+    st.markdown("---")
+
+    # Narrative 2 — Extension
+    st.subheader(f"🟢 Extension — Capital Efficiency  ({len(ext)} events)")
+    st.markdown(
+        "_Extending a 1-mile well to 2 miles generates outsized value "
+        "for a modest incremental capital outlay._"
     )
+    e1, e2, e3, e4 = st.columns(4)
+    inc_npv = ext["incremental_npv10_dollars"].sum()
+    inc_cap = ext["incremental_capex_dollars"].sum()
+    inc_res = ext["incremental_reserves_boe"].sum()
+    marginal_ratio = _safe_div(inc_npv, inc_cap)
+    e1.metric("Incremental NPV10", _f_mm_signed(inc_npv))
+    e2.metric("Incremental Capex", _f_mm(inc_cap))
+    e3.metric(
+        "Marginal NPV / $ Invested",
+        _f_ratio(marginal_ratio),
+        help="Incremental NPV10 per incremental dollar of capital — higher is better",
+    )
+    e4.metric("Incremental Reserves", _f_mboe(inc_res))
 
-    # Annualized impact at the stated 22-well development pace.
-    annual_rows = []
-    for curve in [LADDER_CURVE_125, LADDER_CURVE_100]:
-        d = filtered[filtered[COL_NEW_CURVE] == curve]
-        if d.empty:
-            continue
-        annual_rows.append({
-            "Type Curve": curve,
-            "Capital Saved / Year ($MM)": d["capital_saved_dollars"].mean() * LADDER_WELLS_PER_YEAR / 1e6,
-            "NPV10 Added / Year ($MM)": d["npv10_delta_dollars"].mean() * LADDER_WELLS_PER_YEAR / 1e6,
-            "Production Added / Year (Mboe)": d["lifetime_volume_delta_boe"].mean() * LADDER_WELLS_PER_YEAR / 1e3,
-        })
-    annual = pd.DataFrame(annual_rows)
+    st.markdown("---")
 
-    if not annual.empty:
-        active_curve = annual.iloc[0]["Type Curve"]
-        active = annual.iloc[0]
-        st.markdown(f"#### Annual Impact at 22 Wells — {active_curve}")
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Capital Saved / Year", f"${active['Capital Saved / Year ($MM)']:,.1f} MM")
-        k2.metric("NPV10 Added / Year", f"{active['NPV10 Added / Year ($MM)']:+,.1f} MM")
-        k3.metric("Production Added / Year", f"{active['Production Added / Year (Mboe)']:+,.1f} Mboe")
+    # Narrative 3 — Creation
+    st.subheader(f"🟣 Creation — New Value  ({len(cre)} events)")
+    st.markdown("_Brand-new well locations that add value to the portfolio from scratch._")
+    n1, n2, n3, n4 = st.columns(4)
+    n1.metric("Total NPV10 Added", _f_mm(cre["new_npv10_dollars"].sum()))
+    n2.metric("Total Reserves Added", _f_mboe(cre["new_reserves_boe"].sum()))
+    n3.metric("Avg Payout", _f_years(cre["new_payout_years"].mean()))
+    n4.metric("Avg ROR", _f_pct(cre["new_ror_pct"].mean()))
 
-        fig = go.Figure()
-        fig.add_trace(go.Bar(name="Capital Saved / Year", x=annual["Type Curve"], y=annual["Capital Saved / Year ($MM)"]))
-        fig.add_trace(go.Bar(name="NPV10 Added / Year", x=annual["Type Curve"], y=annual["NPV10 Added / Year ($MM)"]))
-        _apply_layout(fig, "Annual Capital Saved and NPV10 Added at 22 Wells / Year", "Development Tier", "$MM / year")
-        fig.update_layout(barmode="group")
-        st.plotly_chart(fig, use_container_width=True)
+    # ── Value bridge waterfall ────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Value Bridge — NPV10 Contribution by Strategy")
 
-        fig_prod = go.Figure(go.Bar(
-            x=annual["Type Curve"], y=annual["Production Added / Year (Mboe)"],
-            text=annual["Production Added / Year (Mboe)"].map(lambda x: f"{x:+,.1f}"),
-            textposition="outside",
-        ))
-        _apply_layout(fig_prod, "Production Added at 22 Wells / Year", "Development Tier", "Mboe / year")
-        st.plotly_chart(fig_prod, use_container_width=True)
+    consol_npv = consol["new_npv10_dollars"].sum()
+    ext_npv_inc = ext["incremental_npv10_dollars"].sum()
+    cre_npv = cre["new_npv10_dollars"].sum()
+    total_npv = consol_npv + ext_npv_inc + cre_npv
 
-    with st.expander("Portfolio totals for selected curves", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Capital Saved", _f_mm(filtered["capital_saved_dollars"].sum()))
-        c2.metric("Total Δ NPV10", _f_mm_signed(filtered["npv10_delta_dollars"].sum()))
-        c3.metric("Total Δ Production", _f_mboe(filtered["lifetime_volume_delta_boe"].sum()))
+    fig_wf = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=["relative", "relative", "relative", "total"],
+        x=["Consolidation NPV10", "Extension Δ NPV10", "Creation NPV10", "Total Portfolio"],
+        y=[consol_npv / 1e6, ext_npv_inc / 1e6, cre_npv / 1e6, 0],
+        text=[_f_mm(consol_npv), _f_mm(ext_npv_inc), _f_mm(cre_npv), _f_mm(total_npv)],
+        textposition="outside",
+        connector=dict(line=dict(color="#CBD5E1", width=1)),
+        increasing=dict(marker=dict(color=PAL_POSITIVE)),
+        decreasing=dict(marker=dict(color=PAL_NEGATIVE)),
+        totals=dict(marker=dict(color="#1E3A5F")),
+    ))
+    _apply_layout(fig_wf, "NPV10 Value Bridge ($MM)", yaxis="NPV10 ($MM)")
+    fig_wf.update_layout(showlegend=False)
+    st.plotly_chart(fig_wf, use_container_width=True)
 
 # ── 2. CONSOLIDATION DEEP-DIVE ───────────────────────────────────────────────
 def render_consolidation(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
@@ -1246,7 +1266,7 @@ def main():
     page = st.sidebar.radio(
         "Navigate",
         [
-            "Executive Summary",
+            "Portfolio Overview",
             "Consolidation",
             "Extension",
             "Creation",
@@ -1254,7 +1274,7 @@ def main():
             "Data & Downloads",
         ],
         captions=[
-            "Development ladder & annual value",
+            "Aggregate KPIs & value bridge",
             "Capital removal — 2-mile vs. 2×1-mile",
             "Capital efficiency — 1→2 mile uplift",
             "New inventory value creation",
@@ -1263,7 +1283,7 @@ def main():
         ],
     )
 
-    if page == "Executive Summary":
+    if page == "Portfolio Overview":
         render_portfolio_overview(econ)
     elif page == "Consolidation":
         render_consolidation(econ, event_forecasts)
