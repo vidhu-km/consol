@@ -888,46 +888,6 @@ def render_extension(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
     fig.update_layout(barmode="stack")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Incremental efficiency scatter
-    st.markdown("#### Capital Efficiency: Incremental Capex vs. Incremental NPV10")
-    eff_df = df[[
-        "event",
-        COL_NEW_CURVE,
-        "incremental_capex_dollars",
-        "incremental_npv10_dollars",
-        "incremental_reserves_boe",
-    ]].copy()
-    eff_df["Inc. Capex ($MM)"] = eff_df["incremental_capex_dollars"] / 1e6
-    eff_df["Inc. NPV10 ($MM)"] = eff_df["incremental_npv10_dollars"] / 1e6
-    eff_df["Inc. Reserves (Mboe)"] = eff_df["incremental_reserves_boe"] / 1e3
-    eff_df["Bubble Size"] = eff_df["Inc. Reserves (Mboe)"].abs()
-
-    fig2 = px.scatter(
-        eff_df,
-        x="Inc. Capex ($MM)",
-        y="Inc. NPV10 ($MM)",
-        size="Bubble Size",
-        hover_data=["event", COL_NEW_CURVE, "Inc. Reserves (Mboe)"],
-        color_discrete_sequence=[PAL_EXTENSION],
-        size_max=28,
-    )
-    _apply_layout(fig2, "Incremental Capital vs. Incremental NPV10", "Incremental Capex ($MM)", "Incremental NPV10 ($MM)")
-    # 1:1 reference line
-    max_val = max(
-        eff_df["Inc. Capex ($MM)"].max() if len(eff_df) else 1,
-        eff_df["Inc. NPV10 ($MM)"].max() if len(eff_df) else 1,
-    ) * 1.1
-    fig2.add_shape(
-        type="line", x0=0, x1=max_val, y0=0, y1=max_val,
-        line=dict(dash="dot", color="#94A3B8", width=1),
-    )
-    fig2.add_annotation(
-        x=max_val * 0.85, y=max_val * 0.88,
-        text="1:1 line", showarrow=False,
-        font=dict(size=10, color="#94A3B8"),
-    )
-    st.plotly_chart(fig2, use_container_width=True)
-
     # Detail table
     with st.expander("📋 Event Detail Table", expanded=False):
         detail = df[[
