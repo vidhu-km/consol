@@ -665,24 +665,24 @@ def render_portfolio_overview(econ: pd.DataFrame):
     )
     c1, c2, c3, c4 = st.columns(4)
     total_cap_saved = consol["capital_saved_dollars"].sum()
-    avg_cor_improv = consol["cost_of_reserves_improvement"].mean()
-    avg_new_cor = consol["new_cost_of_reserves_derived"].mean()
-    avg_old_cor = consol["old_cost_of_reserves_derived"].mean()
+    portfolio_old_cor = _safe_div(consol["old_capex_dollars"].sum(), consol["old_reserves_boe"].sum())
+    portfolio_new_cor = _safe_div(consol["new_capex_dollars"].sum(), consol["new_reserves_boe"].sum())
+    portfolio_cor_improv = portfolio_old_cor - portfolio_new_cor
     c1.metric("Capital Saved", _f_mm(total_cap_saved), help="Old plan Capex minus new plan Capex")
     c2.metric(
-        "Old Average Cost/boe",
-        _f_dollarboe(avg_old_cor),
-        help="Average cost of reserves for the old plan",
+        "Portfolio Old Cost/boe",
+        _f_dollarboe(portfolio_old_cor),
+        help="Total old-plan Capex divided by total old-plan reserves",
     )
     c3.metric(
-        "New Average Cost/boe",
-        _f_dollarboe(avg_new_cor),
-        help="Average cost of reserves for the new plan",
+        "Portfolio New Cost/boe",
+        _f_dollarboe(portfolio_new_cor),
+        help="Total new-plan Capex divided by total new-plan reserves",
     )
     c4.metric(
-        "$/boe Saved",
-        _f_dollarboe(avg_cor_improv),
-        help="Average reduction in cost per boe (old - new)",
+        "Portfolio $/boe Saved",
+        _f_dollarboe(portfolio_cor_improv),
+        help="Portfolio old cost of reserves minus portfolio new cost of reserves",
     )
 
     st.markdown("---")
@@ -718,28 +718,70 @@ def render_portfolio_overview(econ: pd.DataFrame):
     n3.metric("Avg Payout", _f_years(cre["new_payout_years"].mean()))
     n4.metric("Avg ROR", _f_pct(cre["new_ror_pct"].mean()))
 
+    # ── Before vs. after portfolio summary ────────────────────────────────
+    st.markdown("---")
+    st.subheader("Portfolio Summary — Old Plan vs. New Plan")
+
+    old_capex_total = filtered["old_capex_dollars"].sum()
+    new_capex_total = filtered["new_capex_dollars"].sum()
+    old_npv_total = filtered["old_npv10_dollars"].sum()
+    new_npv_total = filtered["new_npv10_dollars"].sum()
+    old_reserves_total = filtered["old_reserves_boe"].sum()
+    new_reserves_total = filtered["new_reserves_boe"].sum()
+
+    old_npv_invest = _safe_div(old_npv_total, old_capex_total)
+    new_npv_invest = _safe_div(new_npv_total, new_capex_total)
+    old_portfolio_cor = _safe_div(old_capex_total, old_reserves_total)
+    new_portfolio_cor = _safe_div(new_capex_total, new_reserves_total)
+
+    portfolio_summary = pd.DataFrame({
+        "Metric": ["Capex", "NPV10", "Reserves", "NPV / Invest", "Cost of Reserves"],
+        "Old Plan": [
+            _f_mm(old_capex_total),
+            _f_mm(old_npv_total),
+            _f_mboe(old_reserves_total),
+            _f_ratio(old_npv_invest),
+            _f_dollarboe(old_portfolio_cor),
+        ],
+        "New Plan": [
+            _f_mm(new_capex_total),
+            _f_mm(new_npv_total),
+            _f_mboe(new_reserves_total),
+            _f_ratio(new_npv_invest),
+            _f_dollarboe(new_portfolio_cor),
+        ],
+        "Change": [
+            _f_mm_signed(new_capex_total - old_capex_total),
+            _f_mm_signed(new_npv_total - old_npv_total),
+            _f_mboe(new_reserves_total - old_reserves_total),
+            _f_ratio(new_npv_invest - old_npv_invest),
+            _f_dollarboe(new_portfolio_cor - old_portfolio_cor),
+        ],
+    })
+    st.dataframe(portfolio_summary, use_container_width=True, hide_index=True)
+
     # ── Value bridge waterfall ────────────────────────────────────────────
     st.markdown("---")
-    st.subheader("Value Bridge — NPV10 Contribution by Strategy")
+    st.subheader("Net NPV10 Created by Inventory Overhaul")
 
-    consol_npv = consol["new_npv10_dollars"].sum()
-    ext_npv_inc = ext["incremental_npv10_dollars"].sum()
-    cre_npv = cre["new_npv10_dollars"].sum()
-    total_npv = consol_npv + ext_npv_inc + cre_npv
+    consol_npv_delta = consol["npv10_delta_dollars"].sum()
+    ext_npv_delta = ext["npv10_delta_dollars"].sum()
+    cre_npv_delta = cre["npv10_delta_dollars"].sum()
+    total_npv_delta = consol_npv_delta + ext_npv_delta + cre_npv_delta
 
     fig_wf = go.Figure(go.Waterfall(
         orientation="v",
         measure=["relative", "relative", "relative", "total"],
-        x=["Consolidation NPV10", "Extension Δ NPV10", "Creation NPV10", "Total Portfolio"],
-        y=[consol_npv / 1e6, ext_npv_inc / 1e6, cre_npv / 1e6, 0],
-        text=[_f_mm(consol_npv), _f_mm(ext_npv_inc), _f_mm(cre_npv), _f_mm(total_npv)],
+        x=["Consolidation Δ NPV10", "Extension Δ NPV10", "Creation Δ NPV10", "Net NPV10 Created"],
+        y=[consol_npv_delta / 1e6, ext_npv_delta / 1e6, cre_npv_delta / 1e6, 0],
+        text=[_f_mm_signed(consol_npv_delta), _f_mm_signed(ext_npv_delta), _f_mm_signed(cre_npv_delta), _f_mm_signed(total_npv_delta)],
         textposition="outside",
         connector=dict(line=dict(color="#CBD5E1", width=1)),
         increasing=dict(marker=dict(color=PAL_POSITIVE)),
         decreasing=dict(marker=dict(color=PAL_NEGATIVE)),
         totals=dict(marker=dict(color="#1E3A5F")),
     ))
-    _apply_layout(fig_wf, "NPV10 Value Bridge ($MM)", yaxis="NPV10 ($MM)")
+    _apply_layout(fig_wf, "Net NPV10 Created by Inventory Overhaul ($MM)", yaxis="Δ NPV10 ($MM)")
     fig_wf.update_layout(showlegend=False)
     st.plotly_chart(fig_wf, use_container_width=True)
 
@@ -768,11 +810,27 @@ def render_consolidation(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
     df = consol[mask]
 
     # KPIs
+    portfolio_old_cor = _safe_div(df["old_capex_dollars"].sum(), df["old_reserves_boe"].sum())
+    portfolio_new_cor = _safe_div(df["new_capex_dollars"].sum(), df["new_reserves_boe"].sum())
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Events", f"{len(df)}")
     c2.metric("Total Capital Saved", _f_mm(df["capital_saved_dollars"].sum()))
-    c3.metric("Avg $/boe Improvement", _f_dollarboe(df["cost_of_reserves_improvement"].mean()))
-    c4.metric("Avg NPV/Investment", _f_ratio(df["new_npv_inv_ratio"].mean()))
+    c3.metric(
+        "Portfolio Old Cost/boe",
+        _f_dollarboe(portfolio_old_cor),
+        help="Total old-plan Capex divided by total old-plan reserves",
+    )
+    c4.metric(
+        "Portfolio New Cost/boe",
+        _f_dollarboe(portfolio_new_cor),
+        delta=_f_dollarboe(portfolio_old_cor - portfolio_new_cor),
+        delta_color="normal",
+        help="Total new-plan Capex divided by total new-plan reserves; delta shows $/boe saved",
+    )
+    st.caption(
+        f"Simple event average (secondary): Old {_f_dollarboe(df['old_cost_of_reserves_derived'].mean())} | "
+        f"New {_f_dollarboe(df['new_cost_of_reserves_derived'].mean())}"
+    )
 
     # Cost of reserves comparison chart
     st.markdown("#### Cost of Reserves: Old Plan vs. New Plan")
