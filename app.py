@@ -55,13 +55,6 @@ COL_FORECAST_VOLUME = "boe"
 
 MONEY_TO_DOLLARS = 1000.0
 
-# Development scheduling assumptions
-DEV_WELLS_PER_YEAR = 22
-DEV_START_YEAR = 2026
-DEV_START_MONTH = 6
-DEV_CURVE_PRIORITY = ["VF_BAK_2.0M_125 (June 2026)", "VF_BAK_2.0M_100 (June 2026)"]
-DEFAULT_EXCLUDED_CURVES = {"VF_BAK_2.0M_75 (June 2026)"}
-
 REQUIRED_WELLS_COLS = (
     COL_EVENT, COL_OLD_UWI_1, COL_OLD_UWI_2,
     COL_OLD_CURVE_1, COL_OLD_CURVE_2, COL_NEW_CURVE,
@@ -700,164 +693,6 @@ def _build_zip(files: dict[str, bytes]) -> bytes:
     return buf.read()
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# DEVELOPMENT TIMELINE
-# ────────────────────────────────────────────────────────────────────────────────
-def _default_curve_selection(curves) -> list[str]:
-    """Default all curve filters on except explicitly excluded curves."""
-    return [c for c in curves if c not in DEFAULT_EXCLUDED_CURVES]
-
-
-def build_development_schedule(econ: pd.DataFrame) -> pd.DataFrame:
-    """
-    Schedule the new-plan inventory at 22 wells per calendar year, starting in
-    June 2026.  The 125 curve is developed first until exhausted, then the 100
-    curve.  The 75 curve is excluded from the base development case.
-
-    Events using curves outside the stated 125/100 priority are intentionally
-    left unscheduled so the timeline does not silently invent a priority.
-    """
-    eligible = econ[econ[COL_NEW_CURVE].isin(DEV_CURVE_PRIORITY)].copy()
-    if eligible.empty:
-        return pd.DataFrame()
-
-    priority = {curve: i for i, curve in enumerate(DEV_CURVE_PRIORITY)}
-    eligible["curve_priority"] = eligible[COL_NEW_CURVE].map(priority)
-    eligible = eligible.sort_values(["curve_priority", "event"]).reset_index(drop=True)
-    eligible["development_sequence"] = np.arange(1, len(eligible) + 1)
-    eligible["development_year"] = DEV_START_YEAR + ((eligible["development_sequence"] - 1) // DEV_WELLS_PER_YEAR)
-
-    # Month is for visualization only.  2026 begins in June; later years span Jan-Dec.
-    months = []
-    for _, r in eligible.iterrows():
-        year = int(r["development_year"])
-        seq_in_year = int((r["development_sequence"] - 1) % DEV_WELLS_PER_YEAR)
-        start_month = DEV_START_MONTH if year == DEV_START_YEAR else 1
-        available_months = 13 - start_month
-        month = start_month + int(np.floor(seq_in_year * available_months / DEV_WELLS_PER_YEAR))
-        months.append(min(month, 12))
-    eligible["development_month"] = months
-    eligible["development_date"] = pd.to_datetime(dict(
-        year=eligible["development_year"], month=eligible["development_month"], day=1
-    ))
-    return eligible
-
-
-def build_development_annual(schedule: pd.DataFrame) -> pd.DataFrame:
-    if schedule.empty:
-        return pd.DataFrame()
-    annual = schedule.groupby("development_year", as_index=False).agg(
-        wells_drilled=("event", "count"),
-        old_plan_capex_dollars=("old_capex_dollars", "sum"),
-        new_plan_capex_dollars=("new_capex_dollars", "sum"),
-        old_plan_npv10_dollars=("old_npv10_dollars", "sum"),
-        new_plan_npv10_dollars=("new_npv10_dollars", "sum"),
-        old_plan_eur_boe=("old_eur_boe", "sum"),
-        new_plan_eur_boe=("new_eur_boe", "sum"),
-    )
-    annual["capital_savings_dollars"] = annual["old_plan_capex_dollars"] - annual["new_plan_capex_dollars"]
-    annual["value_added_npv10_dollars"] = annual["new_plan_npv10_dollars"] - annual["old_plan_npv10_dollars"]
-    annual["eur_change_boe"] = annual["new_plan_eur_boe"] - annual["old_plan_eur_boe"]
-    return annual
-
-
-def render_development_timeline(econ: pd.DataFrame):
-    st.title("🗓️ Development Timeline")
-    st.caption("Base case: 22 new wells/year; 125 inventory first, then 100. The 75 curve is excluded by default.")
-
-    schedule = build_development_schedule(econ)
-    if schedule.empty:
-        st.warning("No events matched the 125 / 100 development priority curves.")
-        return
-
-    unscheduled = econ[~econ["event"].isin(schedule["event"])].copy()
-    annual = build_development_annual(schedule)
-
-    with st.expander("Development assumptions", expanded=False):
-        st.markdown(
-            f"**Start:** June {DEV_START_YEAR}  \n"
-            f"**Pace:** {DEV_WELLS_PER_YEAR} wells per calendar year  \n"
-            f"**Priority:** `{DEV_CURVE_PRIORITY[0]}` → `{DEV_CURVE_PRIORITY[1]}`  \n"
-            f"**Default exclusion:** `VF_BAK_2.0M_75 (June 2026)`"
-        )
-        st.caption("Within each type curve, events are sequenced by Event #. Development month is illustrative; the annual 22-well constraint is the governing assumption.")
-
-    total_old_capex = schedule["old_capex_dollars"].sum()
-    total_new_capex = schedule["new_capex_dollars"].sum()
-    total_value = schedule["npv10_delta_dollars"].sum()
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Scheduled Wells", f"{len(schedule):,}")
-    k2.metric("Development Years", f"{annual['development_year'].min():.0f}–{annual['development_year'].max():.0f}")
-    k3.metric("Total Capital Savings", _f_mm(total_old_capex - total_new_capex))
-    k4.metric("Total NPV10 Value Added", _f_mm_signed(total_value))
-
-    st.markdown("---")
-    st.subheader("Annual Capital — Old Plan vs. New Plan")
-    cap = annual.melt(
-        id_vars=["development_year"],
-        value_vars=["old_plan_capex_dollars", "new_plan_capex_dollars"],
-        var_name="Plan", value_name="Capital",
-    )
-    cap["Plan"] = cap["Plan"].map({
-        "old_plan_capex_dollars": "Old Plan",
-        "new_plan_capex_dollars": "New Plan",
-    })
-    fig_cap = px.bar(cap, x="development_year", y=cap["Capital"] / 1e6, color="Plan", barmode="group")
-    _apply_layout(fig_cap, "Annual Development Capital ($MM)", "Development Year", "$MM")
-    st.plotly_chart(fig_cap, use_container_width=True)
-
-    st.subheader("Annual Capital Savings & Value Added")
-    fig_val = go.Figure()
-    fig_val.add_trace(go.Bar(
-        name="Capital Savings", x=annual["development_year"],
-        y=annual["capital_savings_dollars"] / 1e6,
-        text=annual["capital_savings_dollars"].apply(_f_mm_signed), textposition="outside",
-    ))
-    fig_val.add_trace(go.Bar(
-        name="NPV10 Value Added", x=annual["development_year"],
-        y=annual["value_added_npv10_dollars"] / 1e6,
-        text=annual["value_added_npv10_dollars"].apply(_f_mm_signed), textposition="outside",
-    ))
-    _apply_layout(fig_val, "Old Plan vs. New Plan — Annual Economic Impact", "Development Year", "$MM")
-    fig_val.update_layout(barmode="group")
-    st.plotly_chart(fig_val, use_container_width=True)
-
-    st.subheader("Development Sequence")
-    timeline = schedule[[
-        "development_sequence", "development_date", "development_year", "event",
-        "event_type", COL_NEW_CURVE, "old_type_curves_used",
-        "old_capex_dollars", "new_capex_dollars", "npv10_delta_dollars",
-    ]].copy()
-    timeline["capital_savings_dollars"] = timeline["old_capex_dollars"] - timeline["new_capex_dollars"]
-    timeline = timeline.rename(columns={
-        "development_sequence": "Sequence", "development_date": "Illustrative Drill Month",
-        "development_year": "Year", "event": "Event #", "event_type": "Event Type",
-        COL_NEW_CURVE: "New Type Curve", "old_type_curves_used": "Old Type Curve(s)",
-        "old_capex_dollars": "Old Plan Capex ($)", "new_capex_dollars": "New Plan Capex ($)",
-        "capital_savings_dollars": "Capital Savings ($)", "npv10_delta_dollars": "NPV10 Value Added ($)",
-    })
-    st.dataframe(timeline, use_container_width=True, hide_index=True)
-
-    st.subheader("Annual Summary")
-    annual_display = annual.copy().rename(columns={
-        "development_year": "Year", "wells_drilled": "Wells",
-        "old_plan_capex_dollars": "Old Plan Capex ($)",
-        "new_plan_capex_dollars": "New Plan Capex ($)",
-        "capital_savings_dollars": "Capital Savings ($)",
-        "value_added_npv10_dollars": "NPV10 Value Added ($)",
-        "eur_change_boe": "EUR Change (boe)",
-    })
-    st.dataframe(annual_display[[
-        "Year", "Wells", "Old Plan Capex ($)", "New Plan Capex ($)",
-        "Capital Savings ($)", "NPV10 Value Added ($)", "EUR Change (boe)"
-    ]], use_container_width=True, hide_index=True)
-
-    if not unscheduled.empty:
-        with st.expander(f"Unscheduled / excluded inventory ({len(unscheduled)} events)", expanded=False):
-            st.caption("These events are not forced into the base timeline because their new type curve is outside the stated 125 → 100 priority. This includes the 75 curve.")
-            st.dataframe(unscheduled[["event", "event_type", COL_NEW_CURVE]], use_container_width=True, hide_index=True)
-
-
 # ════════════════════════════════════════════════════════════════════════════════
 # PAGE RENDERERS
 # ════════════════════════════════════════════════════════════════════════════════
@@ -879,7 +714,7 @@ def render_portfolio_overview(econ: pd.DataFrame):
         all_types = ["Consolidation", "Extension", "Creation"]
         sel_types = fc1.multiselect("Event Types", all_types, default=all_types, key="po_types")
         all_curves = sorted(econ[COL_NEW_CURVE].dropna().unique())
-        sel_curves = fc2.multiselect("New Type Curves", all_curves, default=_default_curve_selection(all_curves), key="po_curves")
+        sel_curves = fc2.multiselect("New Type Curves", all_curves, default=all_curves, key="po_curves")
         all_events = sorted(econ["event"].unique())
         sel_events = fc3.multiselect("Event #s (leave blank = all)", all_events, default=[], key="po_events")
 
@@ -1020,7 +855,7 @@ def render_consolidation(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
 
     with st.expander("🔍 Filters", expanded=False):
         curves = sorted(consol[COL_NEW_CURVE].dropna().unique())
-        sel_curves = st.multiselect("New Type Curves", curves, default=_default_curve_selection(curves), key="con_nc")
+        sel_curves = st.multiselect("New Type Curves", curves, default=curves, key="con_nc")
         events = sorted(consol["event"].unique())
         sel_events = st.multiselect("Event #s (leave blank = all)", events, default=[], key="con_ev")
     mask = consol[COL_NEW_CURVE].isin(sel_curves)
@@ -1089,7 +924,7 @@ def render_extension(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
 
     with st.expander("🔍 Filters", expanded=False):
         curves = sorted(ext[COL_NEW_CURVE].dropna().unique())
-        sel_curves = st.multiselect("New Type Curves", curves, default=_default_curve_selection(curves), key="ext_nc")
+        sel_curves = st.multiselect("New Type Curves", curves, default=curves, key="ext_nc")
         events = sorted(ext["event"].unique())
         sel_events = st.multiselect("Event #s (leave blank = all)", events, default=[], key="ext_ev")
     mask = ext[COL_NEW_CURVE].isin(sel_curves)
@@ -1161,7 +996,7 @@ def render_creation(econ: pd.DataFrame):
 
     with st.expander("🔍 Filters", expanded=False):
         curves = sorted(cre[COL_NEW_CURVE].dropna().unique())
-        sel_curves = st.multiselect("New Type Curves", curves, default=_default_curve_selection(curves), key="cre_nc")
+        sel_curves = st.multiselect("New Type Curves", curves, default=curves, key="cre_nc")
         events = sorted(cre["event"].unique())
         sel_events = st.multiselect("Event #s (leave blank = all)", events, default=[], key="cre_ev")
     mask = cre[COL_NEW_CURVE].isin(sel_curves)
@@ -1510,7 +1345,6 @@ def main():
         "Navigate",
         [
             "Portfolio Overview",
-            "Development Timeline",
             "Consolidation",
             "Extension",
             "Creation",
@@ -1519,7 +1353,6 @@ def main():
         ],
         captions=[
             "Executive value stack & value bridge",
-            "22 wells/year: 125 first, then 100",
             "2-mile vs. 2×1-mile: capital + EUR + NPV",
             "1→2 mile: incremental EUR + NPV efficiency",
             "New 2-mile: EUR + NPV + capital efficiency",
@@ -1530,8 +1363,6 @@ def main():
 
     if page == "Portfolio Overview":
         render_portfolio_overview(econ)
-    elif page == "Development Timeline":
-        render_development_timeline(econ)
     elif page == "Consolidation":
         render_consolidation(econ, event_forecasts)
     elif page == "Extension":
