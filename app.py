@@ -312,6 +312,18 @@ def build_event_economics(
     lifetime: pd.DataFrame,
     _forecasts_clean: pd.DataFrame,          # unused but kept for cache key
 ) -> pd.DataFrame:
+    """Build event-level economics and the metric stack used throughout the app.
+
+    Metric philosophy:
+    - EUR is taken from the forecast lifetime volume, not the economic-indicator
+      reserves field, because the forecast is the production basis used by the
+      event comparisons.
+    - Consolidation is evaluated on capital savings, EUR retention, NPV retention,
+      and the resulting NPV/invested-capital efficiency.
+    - Extension is evaluated on incremental EUR, incremental Capex, incremental
+      NPV10, and marginal NPV per incremental dollar invested.
+    - Creation is evaluated on absolute EUR, Capex, NPV10, and NPV/Capex.
+    """
     ind = indicators_clean.set_index(COL_TYPE_CURVE)
     lt = lifetime.set_index(COL_TYPE_CURVE)
     records: list[dict[str, Any]] = []
@@ -350,7 +362,7 @@ def build_event_economics(
         new_npv_inv_ratio = ind.loc[new_curve, COL_NPV_INVESTMENT_RATIO]
         new_cor = ind.loc[new_curve, COL_COST_OF_RESERVES]
 
-        # Deltas
+        # Core totals
         ev["old_capex_dollars"] = old_capex
         ev["new_capex_dollars"] = new_capex
         ev["capex_delta_dollars"] = new_capex - old_capex
@@ -365,20 +377,43 @@ def build_event_economics(
 
         ev["old_lifetime_revenue_dollars"] = old_lt_rev
         ev["new_lifetime_revenue_dollars"] = new_lt_rev
-
         ev["old_lifetime_oi_dollars"] = old_lt_oi
         ev["new_lifetime_oi_dollars"] = new_lt_oi
-
         ev["old_lifetime_volume_boe"] = old_lt_vol
         ev["new_lifetime_volume_boe"] = new_lt_vol
         ev["lifetime_volume_delta_boe"] = new_lt_vol - old_lt_vol
 
+        # Forecast-based EUR metrics: preferred production basis for this app.
+        ev["old_eur_boe"] = old_lt_vol
+        ev["new_eur_boe"] = new_lt_vol
+        ev["incremental_eur_boe"] = new_lt_vol - old_lt_vol
+        ev["eur_retention_pct"] = _safe_div(new_lt_vol, old_lt_vol) * 100 if old_lt_vol > 0 else np.nan
+        ev["eur_uplift_pct"] = (_safe_div(new_lt_vol, old_lt_vol) - 1) * 100 if old_lt_vol > 0 else np.nan
+
+        # Capital efficiency on the total plan.
+        ev["old_npv_per_invest"] = _safe_div(old_npv10, old_capex)
+        ev["new_npv_per_invest"] = _safe_div(new_npv10, new_capex)
+        ev["npv_per_invest_change_pct"] = (
+            (_safe_div(new_npv10, new_capex) / _safe_div(old_npv10, old_capex) - 1) * 100
+            if old_capex > 0 and old_npv10 != 0 and new_capex > 0 else np.nan
+        )
+
+        # Cost per forecasted EUR is more directly tied to production than the
+        # workbook's reserves field, while the original Cost of Reserves field is retained.
+        ev["old_cost_per_eur"] = _safe_div(old_capex, old_lt_vol)
+        ev["new_cost_per_eur"] = _safe_div(new_capex, new_lt_vol)
+        ev["cost_per_eur_improvement"] = (
+            _safe_div(old_capex, old_lt_vol) - _safe_div(new_capex, new_lt_vol)
+            if old_lt_vol > 0 and new_lt_vol > 0 else np.nan
+        )
+
+        # Existing workbook metrics retained for compatibility / drill-downs.
         ev["new_payout_years"] = new_payout
         ev["new_ror_pct"] = new_ror
         ev["new_npv_inv_ratio"] = new_npv_inv_ratio
         ev["new_cost_of_reserves"] = new_cor
 
-        # Derived per-unit metrics
+        # Original reserve-based metrics retained for traceability.
         ev["old_cost_of_reserves_derived"] = _safe_div(old_capex, old_reserves)
         ev["new_cost_of_reserves_derived"] = _safe_div(new_capex, new_reserves)
         ev["cost_of_reserves_delta"] = (
@@ -390,22 +425,40 @@ def build_event_economics(
             if old_reserves > 0 and new_reserves > 0 else np.nan
         )
 
-        # Consolidation specifics
+        # Consolidation-specific economics.
         is_consol = ev["event_type"] == "Consolidation"
         ev["capital_saved_dollars"] = max(old_capex - new_capex, 0.0) if is_consol else 0.0
+        ev["capital_savings_pct"] = (
+            _safe_div(old_capex - new_capex, old_capex) * 100
+            if is_consol and old_capex > 0 else np.nan
+        )
         ev["npv10_sacrificed_dollars"] = max(old_npv10 - new_npv10, 0.0) if is_consol else 0.0
+        ev["npv_retention_pct"] = (
+            _safe_div(new_npv10, old_npv10) * 100
+            if is_consol and old_npv10 > 0 else np.nan
+        )
+        ev["npv_sacrificed_per_capital_saved"] = (
+            _safe_div(old_npv10 - new_npv10, old_capex - new_capex)
+            if is_consol and old_capex > new_capex else np.nan
+        )
 
-        # Extension incremental efficiency
+        # Extension-specific marginal economics.
         inc_cap = new_capex - old_capex
         inc_npv = new_npv10 - old_npv10
         inc_res = new_reserves - old_reserves
+        inc_eur = new_lt_vol - old_lt_vol
         ev["incremental_capex_dollars"] = inc_cap
         ev["incremental_npv10_dollars"] = inc_npv
         ev["incremental_reserves_boe"] = inc_res
+        ev["incremental_eur_boe"] = inc_eur
         ev["marginal_npv_per_inc_capital"] = _safe_div(inc_npv, inc_cap) if inc_cap > 0 else np.nan
-        ev["inc_capital_per_inc_boe"] = _safe_div(inc_cap, inc_res) if inc_res > 0 else np.nan
+        ev["inc_capital_per_inc_eur"] = _safe_div(inc_cap, inc_eur) if inc_eur > 0 else np.nan
+        ev["incremental_eur_per_inc_capital_mboe_per_mm"] = (
+            _safe_div(inc_eur / 1000.0, inc_cap / 1_000_000.0)
+            if inc_cap > 0 and inc_eur > 0 else np.nan
+        )
 
-        # Ratio helpers
+        # Ratio helpers retained for compatibility.
         ev["old_npv_inv_ratio_derived"] = _safe_div(old_npv10, old_capex)
         ev["new_npv_inv_ratio_derived"] = _safe_div(new_npv10, new_capex)
 
@@ -567,6 +620,25 @@ def _f_rate(v):
     return f"{v:,.0f} boe/d"
 
 
+def _f_bbl(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "N/A"
+    return f"{v / 1_000:,.0f} Mboe"
+
+
+def _f_pct_signed(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "N/A"
+    sign = "+" if v >= 0 else ""
+    return f"{sign}{v:,.1f}%"
+
+
+def _f_boe_per_dollar(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "N/A"
+    return f"{v:,.0f} boe/$MM"
+
+
 # ────────────────────────────────────────────────────────────────────────────────
 # CHART HELPERS
 # ────────────────────────────────────────────────────────────────────────────────
@@ -628,7 +700,7 @@ def _build_zip(files: dict[str, bytes]) -> bytes:
 
 # ── 1. PORTFOLIO OVERVIEW ─────────────────────────────────────────────────────
 def render_portfolio_overview(econ: pd.DataFrame):
-    """Top-level page: one card per narrative with aggregate KPIs + a value bridge chart."""
+    """Top-level page: executive metric stack + value bridge."""
     st.title("📊 Portfolio Overview")
     st.caption("High-level value creation across all three strategies")
 
@@ -654,108 +726,91 @@ def render_portfolio_overview(econ: pd.DataFrame):
     ext = filtered[filtered["event_type"] == "Extension"]
     cre = filtered[filtered["event_type"] == "Creation"]
 
-    # ── KPI cards ─────────────────────────────────────────────────────────
+    # ── Executive portfolio KPIs ──────────────────────────────────────────
     st.markdown("---")
-
-    # Narrative 1 — Consolidation
-    st.subheader(f"🔵 Consolidation — Capital Removal  ({len(consol)} events)")
-    st.markdown(
-        "_Drilling one 2-mile well instead of two 1-mile wells "
-        "saves capital while maintaining strong per-barrel economics._"
-    )
-    c1, c2, c3, c4 = st.columns(4)
-    total_cap_saved = consol["capital_saved_dollars"].sum()
-    portfolio_old_cor = _safe_div(consol["old_capex_dollars"].sum(), consol["old_reserves_boe"].sum())
-    portfolio_new_cor = _safe_div(consol["new_capex_dollars"].sum(), consol["new_reserves_boe"].sum())
-    portfolio_cor_improv = portfolio_old_cor - portfolio_new_cor
-    c1.metric("Capital Saved", _f_mm(total_cap_saved), help="Old plan Capex minus new plan Capex")
-    c2.metric(
-        "Portfolio Old Cost/boe",
-        _f_dollarboe(portfolio_old_cor),
-        help="Total old-plan Capex divided by total old-plan reserves",
-    )
-    c3.metric(
-        "Portfolio New Cost/boe",
-        _f_dollarboe(portfolio_new_cor),
-        help="Total new-plan Capex divided by total new-plan reserves",
-    )
-    c4.metric(
-        "Portfolio $/boe Saved",
-        _f_dollarboe(portfolio_cor_improv),
-        help="Portfolio old cost of reserves minus portfolio new cost of reserves",
-    )
-
-    st.markdown("---")
-
-    # Narrative 2 — Extension
-    st.subheader(f"🟢 Extension — Capital Efficiency  ({len(ext)} events)")
-    st.markdown(
-        "_Extending a 1-mile well to 2 miles generates outsized value "
-        "for a modest incremental capital outlay._"
-    )
-    e1, e2, e3, e4 = st.columns(4)
-    inc_npv = ext["incremental_npv10_dollars"].sum()
-    inc_cap = ext["incremental_capex_dollars"].sum()
-    inc_res = ext["incremental_reserves_boe"].sum()
-    marginal_ratio = _safe_div(inc_npv, inc_cap)
-    e1.metric("Incremental NPV10", _f_mm_signed(inc_npv))
-    e2.metric("Incremental Capex", _f_mm(inc_cap))
-    e3.metric(
-        "Marginal NPV / $ Invested",
-        _f_ratio(marginal_ratio),
-        help="Incremental NPV10 per incremental dollar of capital — higher is better",
-    )
-    e4.metric("Incremental Reserves", _f_mboe(inc_res))
-
-    st.markdown("---")
-
-    # Narrative 3 — Creation
-    st.subheader(f"🟣 Creation — New Value  ({len(cre)} events)")
-    st.markdown("_Brand-new well locations that add value to the portfolio from scratch._")
-    n1, n2, n3, n4 = st.columns(4)
-    n1.metric("Total NPV10 Added", _f_mm(cre["new_npv10_dollars"].sum()))
-    n2.metric("Total Reserves Added", _f_mboe(cre["new_reserves_boe"].sum()))
-    n3.metric("Avg Payout", _f_years(cre["new_payout_years"].mean()))
-    n4.metric("Avg ROR", _f_pct(cre["new_ror_pct"].mean()))
-
-    # ── Before vs. after portfolio summary ────────────────────────────────
-    st.markdown("---")
-    st.subheader("Portfolio Summary — Old Plan vs. New Plan")
-
+    total_npv_delta = filtered["npv10_delta_dollars"].sum()
+    total_capex_delta = filtered["capex_delta_dollars"].sum()
+    total_eur_delta = filtered["incremental_eur_boe"].sum()
     old_capex_total = filtered["old_capex_dollars"].sum()
     new_capex_total = filtered["new_capex_dollars"].sum()
     old_npv_total = filtered["old_npv10_dollars"].sum()
     new_npv_total = filtered["new_npv10_dollars"].sum()
-    old_reserves_total = filtered["old_reserves_boe"].sum()
-    new_reserves_total = filtered["new_reserves_boe"].sum()
+    old_eur_total = filtered["old_eur_boe"].sum()
+    new_eur_total = filtered["new_eur_boe"].sum()
 
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Net NPV10 Created", _f_mm_signed(total_npv_delta),
+              help="New-plan NPV10 minus old-plan NPV10 across the filtered inventory")
+    p2.metric("Net Capital Change", _f_mm_signed(total_capex_delta),
+              help="New-plan Capex minus old-plan Capex; negative means capital savings")
+    p3.metric("Net EUR Change", _f_mboe(total_eur_delta),
+              help="Forecast lifetime production change, using forecast volume as EUR")
+    p4.metric("New NPV / Invest", _f_ratio(_safe_div(new_npv_total, new_capex_total)),
+              help="Portfolio NPV10 divided by new-plan invested capital")
+
+    # ── Narrative 1 — Consolidation ───────────────────────────────────────
+    st.markdown("---")
+    st.subheader(f"🔵 Consolidation — Capital Removal  ({len(consol)} events)")
+    st.markdown("_One 2-mile replaces two 1-miles: optimize capital while preserving as much production and value as possible._")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Capital Saved", _f_mm(consol["capital_saved_dollars"].sum()))
+    c2.metric("EUR Retention", _f_pct(_safe_div(consol["new_eur_boe"].sum(), consol["old_eur_boe"].sum()) * 100))
+    c3.metric("NPV Retention", _f_pct(_safe_div(consol["new_npv10_dollars"].sum(), consol["old_npv10_dollars"].sum()) * 100))
+    c4.metric("New NPV / Invest", _f_ratio(_safe_div(consol["new_npv10_dollars"].sum(), consol["new_capex_dollars"].sum())))
+
+    # ── Narrative 2 — Extension ───────────────────────────────────────────
+    st.markdown("---")
+    st.subheader(f"🟢 Extension — Capital Efficiency  ({len(ext)} events)")
+    st.markdown("_Extending an existing 1-mile: focus on incremental production and value generated by the additional capital._")
+    e1, e2, e3, e4 = st.columns(4)
+    inc_npv = ext["incremental_npv10_dollars"].sum()
+    inc_cap = ext["incremental_capex_dollars"].sum()
+    inc_eur = ext["incremental_eur_boe"].sum()
+    e1.metric("Incremental NPV10", _f_mm_signed(inc_npv))
+    e2.metric("Incremental Capex", _f_mm(inc_cap))
+    e3.metric("Incremental EUR", _f_mboe(inc_eur))
+    e4.metric("Marginal NPV / $", _f_ratio(_safe_div(inc_npv, inc_cap)))
+
+    # ── Narrative 3 — Creation ────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader(f"🟣 Creation — New Value  ({len(cre)} events)")
+    st.markdown("_New 2-mile locations: rank on absolute value and capital efficiency._")
+    n1, n2, n3, n4 = st.columns(4)
+    n1.metric("New Locations", f"{len(cre)}")
+    n2.metric("EUR Added", _f_mboe(cre["new_eur_boe"].sum()))
+    n3.metric("NPV10 Added", _f_mm(cre["new_npv10_dollars"].sum()))
+    n4.metric("NPV / Capex", _f_ratio(_safe_div(cre["new_npv10_dollars"].sum(), cre["new_capex_dollars"].sum())))
+
+    # ── Before vs. after portfolio summary ────────────────────────────────
+    st.markdown("---")
+    st.subheader("Portfolio Summary — Old Plan vs. New Plan")
     old_npv_invest = _safe_div(old_npv_total, old_capex_total)
     new_npv_invest = _safe_div(new_npv_total, new_capex_total)
-    old_portfolio_cor = _safe_div(old_capex_total, old_reserves_total)
-    new_portfolio_cor = _safe_div(new_capex_total, new_reserves_total)
+    old_cost_per_eur = _safe_div(old_capex_total, old_eur_total)
+    new_cost_per_eur = _safe_div(new_capex_total, new_eur_total)
 
     portfolio_summary = pd.DataFrame({
-        "Metric": ["Capex", "NPV10", "Reserves", "NPV / Invest", "Cost of Reserves"],
+        "Metric": ["Capex", "Forecast EUR", "NPV10", "NPV / Invest", "Capex / EUR"],
         "Old Plan": [
             _f_mm(old_capex_total),
+            _f_mboe(old_eur_total),
             _f_mm(old_npv_total),
-            _f_mboe(old_reserves_total),
             _f_ratio(old_npv_invest),
-            _f_dollarboe(old_portfolio_cor),
+            _f_dollarboe(old_cost_per_eur),
         ],
         "New Plan": [
             _f_mm(new_capex_total),
+            _f_mboe(new_eur_total),
             _f_mm(new_npv_total),
-            _f_mboe(new_reserves_total),
             _f_ratio(new_npv_invest),
-            _f_dollarboe(new_portfolio_cor),
+            _f_dollarboe(new_cost_per_eur),
         ],
         "Change": [
             _f_mm_signed(new_capex_total - old_capex_total),
+            _f_mboe(new_eur_total - old_eur_total),
             _f_mm_signed(new_npv_total - old_npv_total),
-            _f_mboe(new_reserves_total - old_reserves_total),
             _f_ratio(new_npv_invest - old_npv_invest),
-            _f_dollarboe(new_portfolio_cor - old_portfolio_cor),
+            _f_dollarboe(new_cost_per_eur - old_cost_per_eur),
         ],
     })
     st.dataframe(portfolio_summary, use_container_width=True, hide_index=True)
@@ -763,7 +818,6 @@ def render_portfolio_overview(econ: pd.DataFrame):
     # ── Value bridge waterfall ────────────────────────────────────────────
     st.markdown("---")
     st.subheader("Net NPV10 Created by Inventory Overhaul")
-
     consol_npv_delta = consol["npv10_delta_dollars"].sum()
     ext_npv_delta = ext["npv10_delta_dollars"].sum()
     cre_npv_delta = cre["npv10_delta_dollars"].sum()
@@ -785,12 +839,13 @@ def render_portfolio_overview(econ: pd.DataFrame):
     fig_wf.update_layout(showlegend=False)
     st.plotly_chart(fig_wf, use_container_width=True)
 
+
 # ── 2. CONSOLIDATION DEEP-DIVE ───────────────────────────────────────────────
 def render_consolidation(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
     st.title("🔵 Consolidation — Capital Removal")
     st.markdown(
-        "> **Thesis:** A single 2-mile well is cheaper on a per-barrel basis "
-        "than drilling its two constituent 1-mile wells."
+        "> **Thesis:** A single 2-mile should be judged against the two 1-miles it replaces — "
+        "with capital savings balanced against EUR and NPV retention."
     )
 
     consol = econ[econ["event_type"] == "Consolidation"].copy()
@@ -798,7 +853,6 @@ def render_consolidation(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
         st.info("No consolidation events found.")
         return
 
-    # Filters
     with st.expander("🔍 Filters", expanded=False):
         curves = sorted(consol[COL_NEW_CURVE].dropna().unique())
         sel_curves = st.multiselect("New Type Curves", curves, default=curves, key="con_nc")
@@ -809,79 +863,48 @@ def render_consolidation(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
         mask = mask & consol["event"].isin(sel_events)
     df = consol[mask]
 
-    # KPIs
-    portfolio_old_cor = _safe_div(df["old_capex_dollars"].sum(), df["old_reserves_boe"].sum())
-    portfolio_new_cor = _safe_div(df["new_capex_dollars"].sum(), df["new_reserves_boe"].sum())
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Events", f"{len(df)}")
-    c2.metric("Total Capital Saved", _f_mm(df["capital_saved_dollars"].sum()))
-    c3.metric(
-        "Portfolio Old Cost/boe",
-        _f_dollarboe(portfolio_old_cor),
-        help="Total old-plan Capex divided by total old-plan reserves",
-    )
-    c4.metric(
-        "Portfolio New Cost/boe",
-        _f_dollarboe(portfolio_new_cor),
-        delta=_f_dollarboe(portfolio_old_cor - portfolio_new_cor),
-        delta_color="normal",
-        help="Total new-plan Capex divided by total new-plan reserves; delta shows $/boe saved",
-    )
-    st.caption(
-        f"Simple event average (secondary): Old {_f_dollarboe(df['old_cost_of_reserves_derived'].mean())} | "
-        f"New {_f_dollarboe(df['new_cost_of_reserves_derived'].mean())}"
-    )
+    c2.metric("Capital Saved", _f_mm(df["capital_saved_dollars"].sum()))
+    c3.metric("EUR Retention", _f_pct(_safe_div(df["new_eur_boe"].sum(), df["old_eur_boe"].sum()) * 100))
+    c4.metric("NPV Retention", _f_pct(_safe_div(df["new_npv10_dollars"].sum(), df["old_npv10_dollars"].sum()) * 100))
 
-    # Cost of reserves comparison chart
-    st.markdown("#### Cost of Reserves: Old Plan vs. New Plan")
-    bar_df = df[["event", "old_cost_of_reserves_derived", "new_cost_of_reserves_derived"]].copy()
-    bar_df = bar_df.sort_values("old_cost_of_reserves_derived", ascending=False)
+    st.markdown("#### Capital vs. Production Tradeoff")
+    bar_df = df[["event", "old_capex_dollars", "new_capex_dollars", "old_eur_boe", "new_eur_boe"]].copy()
+    bar_df = bar_df.sort_values("old_capex_dollars", ascending=False)
     bar_df["event_label"] = bar_df["event"].astype(str)
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        name="Old Plan (2 × 1-mile)",
-        x=bar_df["event_label"],
-        y=bar_df["old_cost_of_reserves_derived"],
-        marker_color=PAL_OLD,
-    ))
-    fig.add_trace(go.Bar(
-        name="New Plan (1 × 2-mile)",
-        x=bar_df["event_label"],
-        y=bar_df["new_cost_of_reserves_derived"],
-        marker_color=PAL_CONSOLIDATION,
-    ))
-    _apply_layout(fig, "Cost of Reserves by Event ($/boe)", "Event #", "$/boe")
+    fig.add_trace(go.Bar(name="Old Capex: 2 × 1-mile", x=bar_df["event_label"], y=bar_df["old_capex_dollars"] / 1e6, marker_color=PAL_OLD))
+    fig.add_trace(go.Bar(name="New Capex: 1 × 2-mile", x=bar_df["event_label"], y=bar_df["new_capex_dollars"] / 1e6, marker_color=PAL_CONSOLIDATION))
+    _apply_layout(fig, "Capital Requirement by Event ($MM)", "Event #", "$MM")
     fig.update_layout(barmode="group")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Capital saved bar chart
-    st.markdown("#### Capital Saved per Event")
-    cap_df = df[["event", "capital_saved_dollars"]].copy().sort_values("capital_saved_dollars", ascending=False)
-    cap_df["event_label"] = cap_df["event"].astype(str)
+    st.markdown("#### EUR Retention by Consolidation")
+    eur_df = df[["event", "eur_retention_pct"]].copy().sort_values("eur_retention_pct", ascending=True)
+    eur_df["event_label"] = eur_df["event"].astype(str)
     fig2 = go.Figure(go.Bar(
-        x=cap_df["event_label"],
-        y=cap_df["capital_saved_dollars"] / 1e6,
-        marker_color=PAL_POSITIVE,
-        text=cap_df["capital_saved_dollars"].apply(lambda v: f"${v/1e6:,.1f}M"),
-        textposition="outside",
+        x=eur_df["event_label"], y=eur_df["eur_retention_pct"], marker_color=PAL_CONSOLIDATION,
+        text=eur_df["eur_retention_pct"].apply(lambda v: f"{v:,.0f}%"), textposition="outside"
     ))
-    _apply_layout(fig2, "Capital Saved ($MM)", "Event #", "$MM")
+    _apply_layout(fig2, "Forecast EUR Retention (%)", "Event #", "New EUR / Old EUR (%)")
+    fig2.add_hline(y=100, line_dash="dash", line_color="#64748B")
     st.plotly_chart(fig2, use_container_width=True)
 
-    # Detail table
     with st.expander("📋 Event Detail Table", expanded=False):
         detail = df[[
             "event", COL_OLD_UWI_1, COL_OLD_UWI_2, COL_NEW_CURVE,
-            "old_capex_dollars", "new_capex_dollars", "capital_saved_dollars",
-            "old_cost_of_reserves_derived", "new_cost_of_reserves_derived",
-            "cost_of_reserves_improvement",
-            "new_npv_inv_ratio", "new_reserves_boe",
+            "old_capex_dollars", "new_capex_dollars", "capital_saved_dollars", "capital_savings_pct",
+            "old_eur_boe", "new_eur_boe", "eur_retention_pct",
+            "old_npv10_dollars", "new_npv10_dollars", "npv10_delta_dollars", "npv_retention_pct",
+            "new_npv_per_invest",
         ]].copy()
         detail.columns = [
             "Event #", "Old UWI 1", "Old UWI 2", "New Curve",
-            "Old Capex ($)", "New Capex ($)", "Capital Saved ($)",
-            "Old $/boe", "New $/boe", "$/boe Improvement",
-            "NPV/Invest", "Reserves (boe)",
+            "Old Capex ($)", "New Capex ($)", "Capital Saved ($)", "Capital Savings (%)",
+            "Old EUR", "New EUR", "EUR Retention (%)",
+            "Old NPV10 ($)", "New NPV10 ($)", "Δ NPV10 ($)", "NPV Retention (%)",
+            "New NPV/Invest",
         ]
         st.dataframe(detail.sort_values("Event #"), use_container_width=True, hide_index=True)
 
@@ -890,8 +913,8 @@ def render_consolidation(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
 def render_extension(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
     st.title("🟢 Extension — Capital Efficiency")
     st.markdown(
-        "> **Thesis:** Extending a 1-mile well to 2 miles generates outsized "
-        "incremental value for relatively little additional capital."
+        "> **Thesis:** A 1→2-mile extension should be judged on the incremental EUR and NPV "
+        "created by the incremental capital."
     )
 
     ext = econ[econ["event_type"] == "Extension"].copy()
@@ -899,7 +922,6 @@ def render_extension(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
         st.info("No extension events found.")
         return
 
-    # Filters
     with st.expander("🔍 Filters", expanded=False):
         curves = sorted(ext[COL_NEW_CURVE].dropna().unique())
         sel_curves = st.multiselect("New Type Curves", curves, default=curves, key="ext_nc")
@@ -910,57 +932,51 @@ def render_extension(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
         mask = mask & ext["event"].isin(sel_events)
     df = ext[mask]
 
-    # KPIs
     inc_npv = df["incremental_npv10_dollars"].sum()
     inc_cap = df["incremental_capex_dollars"].sum()
-    inc_res = df["incremental_reserves_boe"].sum()
+    inc_eur = df["incremental_eur_boe"].sum()
     e1, e2, e3, e4 = st.columns(4)
-    e1.metric("Events", f"{len(df)}")
-    e2.metric("Incremental NPV10", _f_mm_signed(inc_npv))
-    e3.metric("Incremental Capex", _f_mm(inc_cap))
-    e4.metric(
-        "Marginal NPV / $ Invested",
-        _f_ratio(_safe_div(inc_npv, inc_cap)),
-        help="Every $1 of incremental capital generates this much NPV10",
-    )
+    e1.metric("Incremental NPV10", _f_mm_signed(inc_npv))
+    e2.metric("Incremental Capex", _f_mm(inc_cap))
+    e3.metric("Incremental EUR", _f_mboe(inc_eur))
+    e4.metric("Marginal NPV / $", _f_ratio(_safe_div(inc_npv, inc_cap)),
+              help="Incremental NPV10 per incremental dollar of capital")
 
-    # Stacked bar: old NPV + incremental NPV
-    st.markdown("#### Value Build-Up: Base 1-Mile NPV10 + Incremental from Extension")
-    chart_df = df[["event", "old_npv10_dollars", "incremental_npv10_dollars"]].copy()
+    st.markdown("#### Incremental Value by Extension")
+    chart_df = df[["event", "incremental_npv10_dollars", "incremental_capex_dollars", "incremental_eur_boe"]].copy()
     chart_df = chart_df.sort_values("incremental_npv10_dollars", ascending=False)
     chart_df["event_label"] = chart_df["event"].astype(str)
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        name="1-Mile Base NPV10",
-        x=chart_df["event_label"],
-        y=chart_df["old_npv10_dollars"] / 1e6,
-        marker_color=PAL_OLD,
-    ))
-    fig.add_trace(go.Bar(
-        name="Incremental NPV10 from Extension",
-        x=chart_df["event_label"],
-        y=chart_df["incremental_npv10_dollars"] / 1e6,
-        marker_color=PAL_EXTENSION,
-    ))
-    _apply_layout(fig, "NPV10 Build-Up ($MM)", "Event #", "$MM")
-    fig.update_layout(barmode="stack")
+    fig.add_trace(go.Bar(name="Incremental Capex", x=chart_df["event_label"], y=chart_df["incremental_capex_dollars"] / 1e6, marker_color=PAL_OLD))
+    fig.add_trace(go.Bar(name="Incremental NPV10", x=chart_df["event_label"], y=chart_df["incremental_npv10_dollars"] / 1e6, marker_color=PAL_EXTENSION))
+    _apply_layout(fig, "Incremental Capital and NPV10 ($MM)", "Event #", "$MM")
+    fig.update_layout(barmode="group")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Detail table
+    st.markdown("#### Incremental EUR per $MM Invested")
+    eff_df = df[["event", "incremental_eur_per_inc_capital_mboe_per_mm"]].copy().sort_values("incremental_eur_per_inc_capital_mboe_per_mm", ascending=False)
+    eff_df["event_label"] = eff_df["event"].astype(str)
+    fig2 = go.Figure(go.Bar(
+        x=eff_df["event_label"], y=eff_df["incremental_eur_per_inc_capital_mboe_per_mm"], marker_color=PAL_EXTENSION,
+        text=eff_df["incremental_eur_per_inc_capital_mboe_per_mm"].apply(lambda v: f"{v:,.0f}" if pd.notna(v) else "N/A"), textposition="outside"
+    ))
+    _apply_layout(fig2, "Incremental EUR per $MM Invested", "Event #", "Mboe / $MM")
+    st.plotly_chart(fig2, use_container_width=True)
+
     with st.expander("📋 Event Detail Table", expanded=False):
         detail = df[[
             "event", COL_OLD_CURVE_1, COL_NEW_CURVE,
             "old_capex_dollars", "new_capex_dollars", "incremental_capex_dollars",
             "old_npv10_dollars", "new_npv10_dollars", "incremental_npv10_dollars",
-            "marginal_npv_per_inc_capital",
-            "old_reserves_boe", "new_reserves_boe", "incremental_reserves_boe",
+            "old_eur_boe", "new_eur_boe", "incremental_eur_boe",
+            "marginal_npv_per_inc_capital", "inc_capital_per_inc_eur",
         ]].copy()
         detail.columns = [
             "Event #", "Old Curve", "New Curve",
             "Old Capex ($)", "New Capex ($)", "Δ Capex ($)",
             "Old NPV10 ($)", "New NPV10 ($)", "Δ NPV10 ($)",
-            "Marginal NPV/$",
-            "Old Reserves", "New Reserves", "Δ Reserves",
+            "Old EUR", "New EUR", "Δ EUR",
+            "Marginal NPV/$", "Incremental $/boe",
         ]
         st.dataframe(detail.sort_values("Event #"), use_container_width=True, hide_index=True)
 
@@ -969,8 +985,8 @@ def render_extension(econ: pd.DataFrame, event_forecasts: pd.DataFrame):
 def render_creation(econ: pd.DataFrame):
     st.title("🟣 Creation — New Value")
     st.markdown(
-        "> **Thesis:** New well locations create incremental value "
-        "for the portfolio — pure additions to inventory."
+        "> **Thesis:** New 2-mile locations are standalone capital-allocation opportunities "
+        "and should be ranked on NPV, EUR, and NPV/Capex."
     )
 
     cre = econ[econ["event_type"] == "Creation"].copy()
@@ -978,7 +994,6 @@ def render_creation(econ: pd.DataFrame):
         st.info("No creation events found.")
         return
 
-    # Filters
     with st.expander("🔍 Filters", expanded=False):
         curves = sorted(cre[COL_NEW_CURVE].dropna().unique())
         sel_curves = st.multiselect("New Type Curves", curves, default=curves, key="cre_nc")
@@ -989,14 +1004,12 @@ def render_creation(econ: pd.DataFrame):
         mask = mask & cre["event"].isin(sel_events)
     df = cre[mask]
 
-    # KPIs
     n1, n2, n3, n4 = st.columns(4)
     n1.metric("New Locations", f"{len(df)}")
-    n2.metric("Total NPV10 Added", _f_mm(df["new_npv10_dollars"].sum()))
-    n3.metric("Total Reserves Added", _f_mboe(df["new_reserves_boe"].sum()))
-    n4.metric("Avg ROR", _f_pct(df["new_ror_pct"].mean()))
+    n2.metric("EUR Added", _f_mboe(df["new_eur_boe"].sum()))
+    n3.metric("NPV10 Added", _f_mm(df["new_npv10_dollars"].sum()))
+    n4.metric("NPV / Capex", _f_ratio(_safe_div(df["new_npv10_dollars"].sum(), df["new_capex_dollars"].sum())))
 
-    # NPV10 bar chart
     st.markdown("#### NPV10 by New Well")
     chart_df = df[["event", "new_npv10_dollars", COL_NEW_CURVE]].copy()
     chart_df = chart_df.sort_values("new_npv10_dollars", ascending=False)
@@ -1011,21 +1024,28 @@ def render_creation(econ: pd.DataFrame):
     _apply_layout(fig, "NPV10 Added per New Well ($MM)", "Event #", "$MM")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Detail table
+    st.markdown("#### Capital Efficiency by New Well")
+    eff_df = df[["event", "new_npv_per_invest", "new_cost_per_eur"]].copy().sort_values("new_npv_per_invest", ascending=False)
+    eff_df["event_label"] = eff_df["event"].astype(str)
+    fig2 = go.Figure(go.Bar(
+        x=eff_df["event_label"], y=eff_df["new_npv_per_invest"], marker_color=PAL_CREATION,
+        text=eff_df["new_npv_per_invest"].apply(lambda v: f"{v:,.2f}x" if pd.notna(v) else "N/A"), textposition="outside"
+    ))
+    _apply_layout(fig2, "NPV / Invest by New Well", "Event #", "NPV / Capex")
+    st.plotly_chart(fig2, use_container_width=True)
+
     with st.expander("📋 Event Detail Table", expanded=False):
         detail = df[[
             "event", COL_NEW_CURVE,
-            "new_capex_dollars", "new_npv10_dollars",
-            "new_npv_inv_ratio", "new_ror_pct",
-            "new_payout_years", "new_reserves_boe",
-            "new_cost_of_reserves",
+            "new_capex_dollars", "new_npv10_dollars", "new_eur_boe",
+            "new_npv_per_invest", "new_cost_per_eur",
+            "new_ror_pct", "new_payout_years",
         ]].copy()
         detail.columns = [
             "Event #", "Type Curve",
-            "Capex ($)", "NPV10 ($)",
-            "NPV/Invest", "ROR (%)",
-            "Payout (yrs)", "Reserves (boe)",
-            "Cost of Reserves ($/boe)",
+            "Capex ($)", "NPV10 ($)", "EUR (boe)",
+            "NPV/Capex", "Capex/EUR",
+            "ROR (%)", "Payout (yrs)",
         ]
         st.dataframe(detail.sort_values("Event #"), use_container_width=True, hide_index=True)
 
@@ -1088,21 +1108,21 @@ def render_event_explorer(
     if ev["event_type"] == "Consolidation":
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Capital Saved", _f_mm(ev["capital_saved_dollars"]))
-        k2.metric("$/boe Improvement", _f_dollarboe(ev["cost_of_reserves_improvement"]))
-        k3.metric("NPV/Investment", _f_ratio(ev["new_npv_inv_ratio"]))
-        k4.metric("Payout", _f_years(ev["new_payout_years"]))
+        k2.metric("EUR Retention", _f_pct(ev["eur_retention_pct"]))
+        k3.metric("NPV Retention", _f_pct(ev["npv_retention_pct"]))
+        k4.metric("New NPV / Invest", _f_ratio(ev["new_npv_per_invest"]))
     elif ev["event_type"] == "Extension":
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Δ NPV10", _f_mm_signed(ev["incremental_npv10_dollars"]))
         k2.metric("Δ Capex", _f_mm(ev["incremental_capex_dollars"]))
-        k3.metric("Marginal NPV / $", _f_ratio(ev["marginal_npv_per_inc_capital"]))
-        k4.metric("Δ Reserves", _f_mboe(ev["incremental_reserves_boe"]))
+        k3.metric("Δ EUR", _f_mboe(ev["incremental_eur_boe"]))
+        k4.metric("Marginal NPV / $", _f_ratio(ev["marginal_npv_per_inc_capital"]))
     else:
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("NPV10", _f_mm(ev["new_npv10_dollars"]))
         k2.metric("Capex", _f_mm(ev["new_capex_dollars"]))
-        k3.metric("ROR", _f_pct(ev["new_ror_pct"]))
-        k4.metric("Payout", _f_years(ev["new_payout_years"]))
+        k3.metric("EUR", _f_mboe(ev["new_eur_boe"]))
+        k4.metric("NPV / Capex", _f_ratio(ev["new_npv_per_invest"]))
 
     # Forecast charts
     ev_fc = event_forecasts[event_forecasts["event"] == sel_event]
@@ -1113,9 +1133,9 @@ def render_event_explorer(
         st.markdown("#### Production & Revenue Forecasts")
         mc1, mc2 = st.columns(2)
         metric_map = {
-            "Volume (boe)": ("volume_boe", "cumulative_volume_boe", "boe"),
-            "Revenue ($)": ("total_revenue_dollars", "cumulative_total_revenue_dollars", "$MM"),
+            "Production (boe)": ("volume_boe", "cumulative_volume_boe", "boe"),
             "Operating Income ($)": ("operating_income_dollars", "cumulative_operating_income_dollars", "$MM"),
+            "Revenue ($)": ("total_revenue_dollars", "cumulative_total_revenue_dollars", "$MM"),
         }
         sel_metric = mc1.selectbox("Metric", list(metric_map.keys()), key="ee_fm")
         sel_view = mc2.selectbox("View", ["Monthly", "Cumulative", "Annual"], key="ee_fv")
@@ -1332,10 +1352,10 @@ def main():
             "Data & Downloads",
         ],
         captions=[
-            "Aggregate KPIs & value bridge",
-            "Capital removal — 2-mile vs. 2×1-mile",
-            "Capital efficiency — 1→2 mile uplift",
-            "New inventory value creation",
+            "Executive value stack & value bridge",
+            "2-mile vs. 2×1-mile: capital + EUR + NPV",
+            "1→2 mile: incremental EUR + NPV efficiency",
+            "New 2-mile: EUR + NPV + capital efficiency",
             "Individual event drill-down",
             "Export tables & charts",
         ],
